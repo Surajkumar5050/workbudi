@@ -90,10 +90,22 @@ body {
 
 .gmail-split {
   display: grid;
-  grid-template-columns: 340px 1fr;
-  gap: 16px;
+  grid-template-columns: 360px 1fr;
+  gap: 18px;
   height: calc(100vh - 220px);
   min-height: 520px;
+}
+
+.gmail-list-pane {
+  display: flex !important;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.gmail-detail-pane {
+  display: flex !important;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 @media (max-width: 768px) {
@@ -101,6 +113,14 @@ body {
     grid-template-columns: 1fr;
     height: auto;
     min-height: 480px;
+  }
+
+  .gmail-list-pane.mobile-hide {
+    display: none !important;
+  }
+
+  .gmail-detail-pane.mobile-hide {
+    display: none !important;
   }
 }
 

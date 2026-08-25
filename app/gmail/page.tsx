@@ -349,14 +349,7 @@ export default function GmailPage() {
         {/* 2-column layout */}
         <div className="gmail-split">
           {/* Left — Email List */}
-          <div
-            className="card"
-            style={{
-              display: mobileView === "detail" ? "none" : "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-            }}
-          >
+          <div className={`card gmail-list-pane ${mobileView === "detail" ? "mobile-hide" : ""}`}>
             <div
               style={{
                 padding: "10px 14px",
@@ -493,14 +486,7 @@ export default function GmailPage() {
           </div>
 
           {/* Right — Reading Pane */}
-          <div
-            className="card"
-            style={{
-              display: mobileView === "list" && typeof window !== "undefined" && window.innerWidth <= 768 ? "none" : "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-            }}
-          >
+          <div className={`card gmail-detail-pane ${mobileView === "list" ? "mobile-hide" : ""}`}>
             {selected ? (
               <>
                 {/* Mobile Back Button + Email header */}
