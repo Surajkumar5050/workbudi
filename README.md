@@ -360,6 +360,160 @@ Open `http://localhost:3000`.
 
 ---
 
+## Robin: AI Approach
+
+### How Robin Reasons
+
+Robin is not a general-purpose chatbot. It has a fixed identity and a structured reasoning model that is loaded from `lib/prompts/robin_system_prompt.md` at process start and passed as the Gemini system instruction. This separation matters: the system prompt defines what Robin *is*, while the user-turn prompt injects what the user *has* — two completely independent concerns.
+
+Every Robin turn is structured as four layered context blocks injected into the user-turn prompt:
+
+```
+=== USER GOALS ===
+[goal list from Supabase]
+
+=== TASKS IN DATABASE ===
+[task list with UUIDs, priorities, statuses, deadlines]
+
+=== RECENT INBOUND EMAILS ===
+[latest emails with snippets that provide business context]
+
+=== CONVERSATION HISTORY ===
+[last 4 turns so Robin can refer back to prior context]
+
+=== USER MESSAGE ===
+[the user's actual message]
+```
+
+The system prompt then constrains how Robin uses this context via a fixed four-tier decision order: **(1) Deadline urgency → (2) Priority level → (3) Goal alignment → (4) Email-derived business impact**. This means Robin's recommendations are always explainable — there is no magic, the user can understand exactly why Robin surfaced a given task.
+
+### Why Controlled Actions (Not Direct DB Access)
+
+Robin never writes to the database directly. When the user asks Robin to take a workspace action, Robin appends a single structured `ACTION:{...}` block at the end of its response. The frontend renders this as a confirmation card. Only after the user explicitly confirms does `lib/tools.ts` execute the action against Supabase — under its own defensive layer:
+
+- **`resolveTaskId`**: accepts exact UUID, UUID prefix, or title keyword match so a slightly malformed LLM reference does not hard-fail the operation.
+- **`normalizeStatus` / `normalizePriority`**: maps natural language synonyms (`"wip"`, `"ongoing"`, `"urgent"`) onto the canonical database enum values.
+- **User scope guard**: every write carries `.eq("user_id", userId)` so a resolved task ID from one user can never mutate another user's row.
+
+This is the correct architecture for any production AI assistant operating on real user data: the LLM proposes, the user confirms, the tool layer executes defensively.
+
+### Fallback Architecture
+
+`lib/gemini.ts` implements a three-layer fallback:
+
+1. **`gemini-flash-latest`** (primary, 4-second timeout race)
+2. **`gemini-flash-lite-latest`** (secondary, same timeout)
+3. **`localRobinReasoning`** (deterministic, no external call) — inspects intent keywords and workspace state directly to produce a reasonable recommendation without Gemini
+
+This means Robin remains usable even if the Gemini API is fully down, rate-limited, or the user is on a free-tier key during a demo.
+
+---
+
+## Extending to Calendar and Slack
+
+The current WorkBudi loop handles one inbound communication channel — Gmail. The architecture was deliberately designed as a **source-agnostic ingestion pipeline** so that adding Calendar and Slack requires new adapters, not a rethinking of the core engine.
+
+The pipeline that already exists for Gmail:
+
+```
+Inbound Source → OAuth + Token Refresh → Raw Message Fetch
+→ LLM Extraction (subject + body + existing tasks + thread hint)
+→ Thread-Aware Deduplication (thread_id key on tasks table)
+→ Supabase Insert/Update
+→ Robin Context Injection (Goals + Tasks + Emails + new sources)
+→ Controlled Action Execution (lib/tools.ts allowlist)
+```
+
+Every step of this pipeline is format-agnostic. The Gemini extraction prompt takes `subject` and `body` — it does not care whether those came from an email, a calendar invite description, or a Slack message. The deduplication key (`gmail_thread_id`) is already a generic pattern — it just needs a column name change to become `thread_id` with a `source` discriminator.
+
+### Google Calendar
+
+**What needs to be added:**
+
+1. **OAuth scope** — expand `auth.ts` to request `https://www.googleapis.com/auth/calendar.readonly`. No new OAuth flow needed; it is the same Google token the user already granted. For write actions, request `calendar.events`.
+
+2. **New adapter `lib/calendar.ts`** — mirroring `lib/gmail.ts`:
+   ```ts
+   // Fetch the next 7 days of events + free/busy blocks
+   export async function getUpcomingEvents(accessToken: string) {
+     const calendar = google.calendar({ version: "v3", auth: oauth2Client });
+     const { data } = await calendar.events.list({
+       calendarId: "primary",
+       timeMin: new Date().toISOString(),
+       timeMax: addDays(new Date(), 7).toISOString(),
+       singleEvents: true,
+       orderBy: "startTime",
+     });
+     return data.items ?? [];
+   }
+   ```
+
+3. **New schema table `calendar_events`** — to cache fetched events and avoid re-fetching on every Robin turn:
+   ```sql
+   create table public.calendar_events (
+     id uuid primary key default gen_random_uuid(),
+     user_id uuid not null references public.users(id) on delete cascade,
+     google_event_id text not null,
+     title text not null,
+     start_time timestamptz not null,
+     end_time timestamptz not null,
+     is_focus_block boolean default false,
+     unique (user_id, google_event_id)
+   );
+   ```
+
+4. **Robin context injection** — add a fifth context block to the user-turn prompt in `lib/gemini.ts`:
+   ```
+   === UPCOMING CALENDAR (next 7 days) ===
+   - Today 2pm–4pm: Client sync (busy)
+   - Tomorrow 10am–11am: Team standup (busy)
+   - Tomorrow 11am–3pm: FREE (4-hour focus block available)
+   ```
+   Robin can now say: *"Your highest-priority task — Revised Proposal (due Friday) — has a 4-hour window tomorrow from 11am. I recommend protecting that as a focus block."*
+
+5. **New controlled action** — extend `lib/tools.ts` and the system prompt with:
+   ```
+   ACTION:{"type":"create_calendar_focus_block","params":{"title":"Deep Work: Revised Proposal","start":"2026-08-27T11:00:00+05:30","duration_minutes":120}}
+   ```
+
+**Key design point:** Robin does not autonomously schedule meetings. It proposes a specific focus block and shows a confirmation card. The user confirms before the Calendar API write happens — the same human-in-the-loop pattern as task mutations today.
+
+---
+
+### Slack
+
+**What needs to be added:**
+
+1. **Slack OAuth** — install a Slack App in the user's workspace with `channels:history`, `im:history`, `app_mentions:read`, and `chat:write` bot scopes. Store the `slack_bot_token` and `slack_user_id` on the `users` row alongside the Google tokens.
+
+2. **Inbound webhook handler `app/api/slack/events/route.ts`** — handle Slack's Events API payload verification (HMAC-SHA256 signature) and route `message` and `app_mention` events:
+   ```ts
+   export async function POST(req: NextRequest) {
+     // verify Slack signature
+     const { event } = await req.json();
+     if (event.type === "app_mention" || event.type === "message") {
+       await processSlackMessage(event, userId);
+     }
+   }
+   ```
+
+3. **Same extraction pipeline** — `processSlackMessage` calls `extractTaskFromEmail(event.text, event.text, existingTasks, threadTask)` directly. The Gemini prompt does not need to change because it is already format-agnostic — it reads `subject` and `body` which for Slack become the message text and the thread context.
+
+4. **Thread deduplication** — add `slack_thread_ts` and `slack_channel_id` columns to the `tasks` table (alongside the existing `gmail_thread_id`). A follow-up message in the same Slack thread updates the existing task rather than creating a duplicate, using the same deduplication logic already written in `app/api/gmail/fetch/route.ts`.
+
+5. **Robin context injection** — add a sixth context block to the prompt in `lib/gemini.ts`:
+   ```
+   === RECENT SLACK CONTEXT ===
+   - #engineering (2h ago): "The checkout bug is blocking the release. @suraj can you look at it?" — marked High priority
+   - DM from Priya (1h ago): "Updated designs are ready for your review"
+   ```
+
+6. **Outbound Slack notifications** — when Robin executes a confirmed action (e.g. *"Moving Checkout Bug to in-progress"*), optionally post a confirmation message back to the original Slack thread using `chat.postMessage` so the team stays informed. This is the only outbound write and it requires explicit user confirmation through the same action card flow.
+
+**Key design point:** Slack becomes another read-and-extract source, not a separate system. Robin sees Gmail threads and Slack messages in a single unified workspace context. A task that originated from a Slack mention and was then referenced in a follow-up email is one task — deduplicated by thread identifier — not two.
+
+---
+
 ## Known Limitations
 
 - Gmail scope is read-only (`gmail.readonly`); WorkBudi never sends mail on a user's behalf, by design (also stated explicitly in Robin's system prompt).
