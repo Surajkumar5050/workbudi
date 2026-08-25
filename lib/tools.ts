@@ -197,6 +197,63 @@ export async function executeRobinAction(
         : { success: true, message: `Created new goal: "${title}"` };
     }
 
+    case "delete_goal": {
+      const goalId = action.params.goal_id || action.params.id || null;
+      const goalTitle = action.params.title || action.params.goal_title || null;
+
+      let resolvedGoalId: string | null = goalId;
+
+      // Resolve by title if no ID given
+      if (!resolvedGoalId && goalTitle) {
+        const { data: goals } = await supabaseAdmin
+          .from("goals")
+          .select("id, title")
+          .eq("user_id", userId);
+        const match = goals?.find(
+          (g) =>
+            g.title.toLowerCase().includes(goalTitle.toLowerCase()) ||
+            goalTitle.toLowerCase().includes(g.title.toLowerCase())
+        );
+        resolvedGoalId = match?.id ?? null;
+      }
+
+      if (!resolvedGoalId) {
+        return { success: false, message: "Could not find a goal to delete" };
+      }
+
+      const { error } = await supabaseAdmin
+        .from("goals")
+        .delete()
+        .eq("id", resolvedGoalId)
+        .eq("user_id", userId);
+
+      return error
+        ? { success: false, message: error.message }
+        : { success: true, message: "Goal removed from your workspace" };
+    }
+
+    case "delete_task": {
+      const rawTaskId = action.params.task_id || action.params.id || null;
+      const hintTitle = action.params.task_title || action.params.title || undefined;
+      const resolvedId = await resolveTaskId(rawTaskId, userId, hintTitle);
+
+      if (!resolvedId) {
+        return { success: false, message: "Could not find task to delete" };
+      }
+
+      const { data: deleted, error } = await supabaseAdmin
+        .from("tasks")
+        .delete()
+        .eq("id", resolvedId)
+        .eq("user_id", userId)
+        .select()
+        .single();
+
+      return error
+        ? { success: false, message: error.message }
+        : { success: true, message: `Deleted task "${deleted?.title}"` };
+    }
+
     default:
       return { success: false, message: `Unknown action type "${action.type}"` };
   }

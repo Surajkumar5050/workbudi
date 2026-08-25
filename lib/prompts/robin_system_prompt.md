@@ -69,6 +69,8 @@ ACTION:{"type":"<action_type>","params":{...},"description":"<human-readable sum
 | `update_task_priority` | `task_id`, `priority` | priority must be: `"high"`, `"medium"`, or `"low"` |
 | `create_task` | `title`, `priority`, `deadline` | deadline can be `null` |
 | `create_goal` | `title`, `description` | description can be `null` |
+| `delete_goal` | `title` | use the goal title to resolve; confirm before deleting |
+| `delete_task` | `task_id`, `title` | use the task UUID or title to resolve; confirm before deleting |
 
 ### Critical Constraints
 

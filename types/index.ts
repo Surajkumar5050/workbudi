@@ -55,7 +55,7 @@ export interface RobinMessage {
 }
 
 export interface RobinAction {
-  type: "update_task_deadline" | "update_task_status" | "create_task" | "update_task_priority" | "create_goal";
+  type: "update_task_deadline" | "update_task_status" | "create_task" | "update_task_priority" | "create_goal" | "delete_goal" | "delete_task";
   params: Record<string, string>;
   description: string;
   confirmed?: boolean;

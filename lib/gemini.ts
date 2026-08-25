@@ -179,6 +179,42 @@ function localRobinReasoning(
     };
   }
 
+  // Delete goal intent
+  if (msg.includes("delete goal") || msg.includes("remove goal") || msg.includes("remove it") || msg.includes("delete it")) {
+    const latestGoal = context.goals[context.goals.length - 1];
+    const goalTitle = latestGoal?.title || "";
+    return {
+      reply: goalTitle
+        ? `I'll remove the goal **"${goalTitle}"** from your workspace. Please confirm below.`
+        : `Which goal would you like to remove? I can see: ${context.goals.map((g) => `**${g.title}**`).join(", ")}.`,
+      action: goalTitle
+        ? {
+            type: "delete_goal" as const,
+            params: { title: goalTitle },
+            description: `Delete goal: "${goalTitle}"`,
+          }
+        : null,
+    };
+  }
+
+  // Delete task intent
+  if (msg.includes("delete task") || msg.includes("remove task")) {
+    const activeTasks = context.tasks.filter((t) => t.status !== "done");
+    const targetTask = activeTasks[0] ?? context.tasks[0];
+    return {
+      reply: targetTask
+        ? `I'll delete the task **"${targetTask.title}"** from your workspace. Please confirm below.`
+        : `No tasks found to delete.`,
+      action: targetTask
+        ? {
+            type: "delete_task" as const,
+            params: { task_id: targetTask.id, title: targetTask.title },
+            description: `Delete task: "${targetTask.title}"`,
+          }
+        : null,
+    };
+  }
+
   // Create task intent
   if (msg.includes("create task") || msg.includes("add task") || msg.includes("new task")) {
     const titleMatch = userMessage.replace(/^(create|add|new)\s+(task\s+)?(to\s+)?/i, "").trim();
