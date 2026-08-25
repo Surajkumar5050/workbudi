@@ -59,27 +59,37 @@ export async function extractTaskFromEmail(
   const today = new Date().toISOString().split("T")[0];
 
   const taskList = existingTasks
-    .slice(0, 8)
+    .slice(0, 15)
     .map(
       (t) =>
-        `- ID: ${t.id} | Title: ${t.title} | Priority: ${t.priority} | Deadline: ${t.deadline ?? "none"}`
+        `- ID: ${t.id} | Title: "${t.title}" | Priority: ${t.priority} | Deadline: ${t.deadline ?? "none"}`
     )
     .join("\n");
 
   const threadHint = threadTask
-    ? `\nIMPORTANT: An existing task from this thread already exists: ID=${threadTask.id}, Title="${threadTask.title}". This email is likely an update — do NOT create a duplicate.`
+    ? `\nIMPORTANT: An existing task from this Gmail thread already exists: ID=${threadTask.id}, Title="${threadTask.title}". This email is an update/reply to it — do NOT create a duplicate.`
     : "";
 
-  const systemInstruction = `You are WorkBudi's email extraction engine.
-Your only job is to read an email and output structured JSON describing any actionable work item.
-Today is ${today}. Convert all relative deadline references (e.g. "by Friday", "end of next week") to absolute YYYY-MM-DD dates.
-Respond ONLY with raw JSON — no markdown, no commentary, no explanation.
+  const systemInstruction = `You are WorkBudi's work extraction & deduplication engine.
+Your job is to read an inbound email and output structured JSON describing actionable work items and changes.
+Today is ${today}. Convert all relative deadline references (e.g. "by Friday", "end of next week", "tomorrow") to absolute YYYY-MM-DD dates.
+
+CRITICAL DEDUPLICATION & UPDATE RULES:
+1. Compare this email against the provided "Existing Tasks" list.
+2. If this email refers to, follows up on, updates, changes the deadline of, or modifies the priority of ANY existing task (even across separate emails with similar subjects or topics like "Proposal", "Pitch Deck", "Bug", etc.), you MUST set:
+   - "is_update_to_existing": true
+   - "matched_task_id": "<exact ID of the matching task from Existing Tasks>"
+   - "deadline": updated deadline if mentioned (or null if unchanged)
+   - "priority": updated priority if urgency changed (or null if unchanged)
+3. If it is genuinely brand new work unrelated to any existing task, set "is_update_to_existing": false and "matched_task_id": null.
+4. Respond ONLY with raw JSON — no markdown code fences, no commentary.
+
 Schema: {"has_task":bool,"task_title":string|null,"deadline":"YYYY-MM-DD"|null,"priority":"high"|"medium"|"low"|null,"is_update_to_existing":bool,"matched_task_id":string|null,"context_summary":string}`;
 
   const prompt = `${threadHint ? threadHint + "\n" : ""}Email Subject: ${emailSubject}
-Email Body: ${emailBody.slice(0, 600)}
+Email Body: ${emailBody.slice(0, 800)}
 
-Existing Tasks:
+Existing Tasks in Workspace:
 ${taskList || "None"}`;
 
   try {

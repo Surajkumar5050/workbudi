@@ -126,12 +126,20 @@ export async function POST() {
               };
               if (extracted.deadline) updatePayload.deadline = extracted.deadline;
               if (extracted.priority) updatePayload.priority = extracted.priority;
+              if (extracted.context_summary) updatePayload.description = extracted.context_summary;
 
-              await supabaseAdmin
+              const { data: updatedTask } = await supabaseAdmin
                 .from("tasks")
                 .update(updatePayload)
                 .eq("id", matchedId)
-                .eq("user_id", userId);
+                .eq("user_id", userId)
+                .select()
+                .single();
+
+              if (updatedTask) {
+                const idx = tasks.findIndex((t) => t.id === matchedId);
+                if (idx !== -1) tasks[idx] = updatedTask;
+              }
 
               extractedTaskId = matchedId;
             } else {
