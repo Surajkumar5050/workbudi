@@ -182,6 +182,21 @@ export async function executeRobinAction(
         : { success: true, message: `Created task "${title}"` };
     }
 
+    case "create_goal": {
+      const title = action.params.title || action.params.goal_title || "New Goal";
+      const description = action.params.description || null;
+
+      const { error } = await supabaseAdmin.from("goals").insert({
+        user_id: userId,
+        title,
+        description,
+      });
+
+      return error
+        ? { success: false, message: error.message }
+        : { success: true, message: `Created new goal: "${title}"` };
+    }
+
     default:
       return { success: false, message: `Unknown action type "${action.type}"` };
   }

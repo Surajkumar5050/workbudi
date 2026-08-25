@@ -165,6 +165,20 @@ function localRobinReasoning(
     }
   }
 
+  // Create goal intent
+  if (msg.includes("create goal") || msg.includes("add goal") || msg.includes("new goal") || msg.includes("set goal")) {
+    const titleMatch = userMessage.replace(/^(create|add|new|set)\s+(a\s+)?(goal\s+)?(to\s+|for\s+)?/i, "").trim();
+    const goalTitle = titleMatch || "Scale Q3 Revenue";
+    return {
+      reply: `I've prepared a new workspace goal: **"${goalTitle}"**. Click confirm below to add it to your dashboard.`,
+      action: {
+        type: "create_goal",
+        params: { title: goalTitle, description: "Created via Robin AI" },
+        description: `Create goal: "${goalTitle}"`,
+      },
+    };
+  }
+
   // Create task intent
   if (msg.includes("create task") || msg.includes("add task") || msg.includes("new task")) {
     const titleMatch = userMessage.replace(/^(create|add|new)\s+(task\s+)?(to\s+)?/i, "").trim();
