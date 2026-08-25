@@ -1,18 +1,12 @@
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
-import { createClient } from "@supabase/supabase-js";
-
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!,
-  { auth: { persistSession: false } }
-);
+import { supabaseAdmin } from "@/lib/supabase";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
     Google({
-      clientId: process.env.GOOGLE_CLIENT_ID!,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
+      clientId: process.env.GOOGLE_CLIENT_ID || "placeholder-client-id",
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET || "placeholder-client-secret",
       authorization: {
         params: {
           scope: "openid email profile https://www.googleapis.com/auth/gmail.readonly",
@@ -32,7 +26,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         const email = profile.email as string;
 
-        const { data: existing } = await supabase
+        const { data: existing } = await supabaseAdmin
           .from("users")
           .select("id")
           .eq("email", email)
@@ -41,7 +35,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         if (existing) {
           token.userId = existing.id;
 
-          await supabase
+          await supabaseAdmin
             .from("users")
             .update({
               access_token: account.access_token,
@@ -50,7 +44,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             })
             .eq("id", existing.id);
         } else {
-          const { data: newUser } = await supabase
+          const { data: newUser } = await supabaseAdmin
             .from("users")
             .insert({
               email,
