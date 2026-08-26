@@ -3,6 +3,11 @@ import Google from "next-auth/providers/google";
 import { supabaseAdmin } from "@/lib/supabase";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
+  secret:
+    process.env.AUTH_SECRET ||
+    process.env.NEXTAUTH_SECRET ||
+    "workbudi-nextauth-super-secret-key-prod-2026-fallback",
+  trustHost: true,
   providers: [
     Google({
       clientId: process.env.GOOGLE_CLIENT_ID || "placeholder-client-id",
