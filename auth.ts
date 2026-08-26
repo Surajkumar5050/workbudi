@@ -26,38 +26,49 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         const email = profile.email as string;
 
-        const { data: existing } = await supabaseAdmin
-          .from("users")
-          .select("id")
-          .eq("email", email)
-          .maybeSingle();
-
-        if (existing) {
-          token.userId = existing.id;
-
-          await supabaseAdmin
+        try {
+          const { data: existing } = await supabaseAdmin
             .from("users")
-            .update({
-              access_token: account.access_token,
-              refresh_token: account.refresh_token,
-              expires_at: account.expires_at,
-            })
-            .eq("id", existing.id);
-        } else {
-          const { data: newUser } = await supabaseAdmin
-            .from("users")
-            .insert({
-              email,
-              name: profile.name,
-              image: profile.picture,
-              access_token: account.access_token,
-              refresh_token: account.refresh_token,
-              expires_at: account.expires_at,
-            })
             .select("id")
-            .single();
+            .eq("email", email)
+            .maybeSingle();
 
-          if (newUser) token.userId = newUser.id;
+          if (existing) {
+            token.userId = existing.id;
+
+            const patch: Record<string, unknown> = {
+              access_token: account.access_token ?? null,
+              expires_at: account.expires_at ?? null,
+            };
+            if (account.refresh_token) {
+              patch.refresh_token = account.refresh_token;
+            }
+
+            await supabaseAdmin
+              .from("users")
+              .update(patch)
+              .eq("id", existing.id);
+          } else {
+            const { data: newUser, error: insertError } = await supabaseAdmin
+              .from("users")
+              .insert({
+                email,
+                name: profile.name ?? null,
+                image: (profile as Record<string, unknown>).picture ?? null,
+                access_token: account.access_token ?? null,
+                refresh_token: account.refresh_token ?? null,
+                expires_at: account.expires_at ?? null,
+              })
+              .select("id")
+              .single();
+
+            if (insertError) {
+              console.error("[Auth] User insert error:", insertError);
+            }
+            if (newUser) token.userId = newUser.id;
+          }
+        } catch (dbErr) {
+          console.error("[Auth] Database error in jwt callback:", dbErr);
         }
       }
       return token;
