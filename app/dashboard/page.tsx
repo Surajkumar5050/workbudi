@@ -163,8 +163,16 @@ export default function DashboardPage() {
       body: JSON.stringify({ id, answer }),
     });
     if (res.ok) {
-      setClarifications((prev) => prev.filter((c) => c.id !== id));
-      // Refresh tasks in case a new one was created
+      const result = await res.json();
+      if (result.status === "still_unclear") {
+        // Re-fetch clarifications so the card stays visible with the new sharper question
+        const cr = await fetch("/api/clarifications");
+        const clarifData = cr.ok ? await cr.json() : [];
+        setClarifications(Array.isArray(clarifData) ? clarifData : []);
+      } else {
+        setClarifications((prev) => prev.filter((c) => c.id !== id));
+      }
+      // Refresh tasks in case a new one was created or updated
       const tr = await fetch("/api/tasks");
       const tasksData = await tr.json();
       if (Array.isArray(tasksData)) setTasks(tasksData);
@@ -172,6 +180,7 @@ export default function DashboardPage() {
       setError("Could not answer clarification.");
     }
   }
+
 
   async function dismissClarification(id: string) {
     const res = await fetch("/api/clarifications", {
