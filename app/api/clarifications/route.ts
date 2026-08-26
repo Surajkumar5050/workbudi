@@ -141,6 +141,11 @@ export async function PATCH(req: NextRequest) {
   });
 
   let resultingTaskId: string | null = null;
+  // Track whether we produced a clean, deliberate outcome that is safe to close.
+  // A clarification should NEVER be silently marked "answered" unless:
+  //   (a) a task was actually created or updated, OR
+  //   (b) the user's answer confirmed there is nothing to do (no_action / fyi_only)
+  let safeToClose = false;
 
   switch (reanalysis.classification) {
     case "new_task": {
@@ -157,7 +162,7 @@ export async function PATCH(req: NextRequest) {
             source: "gmail",
             gmail_thread_id: clarif.thread_id,
             extraction_confidence: reanalysis.confidence,
-            needs_review: false, // user confirmed — no longer needs review
+            needs_review: false,
             goal_id: null,
           })
           .select()
@@ -165,8 +170,8 @@ export async function PATCH(req: NextRequest) {
 
         if (newTask) {
           resultingTaskId = newTask.id;
+          safeToClose = true;
 
-          // Write dependencies if detected
           if (reanalysis.depends_on_task_ids?.length > 0) {
             const validTasks = tasks.filter((t) =>
               reanalysis.depends_on_task_ids.includes(t.id)
@@ -181,7 +186,40 @@ export async function PATCH(req: NextRequest) {
               );
             }
           }
+        } else {
+          // Task insert returned nothing (rare DB error) — re-ask rather than silently close
+          await supabaseAdmin
+            .from("clarifications")
+            .update({
+              question:
+                "We had trouble saving your task. Could you rephrase what needs to be done and by when?",
+              answer: null,
+            })
+            .eq("id", id);
+
+          return NextResponse.json({
+            status: "still_unclear",
+            follow_up_question:
+              "We had trouble saving your task. Could you rephrase what needs to be done and by when?",
+          });
         }
+      } else {
+        // AI returned new_task but with no title — the answer wasn't specific enough.
+        // Re-ask with a sharper, targeted question instead of silently closing.
+        const sharpQuestion =
+          reanalysis.clarifying_question ??
+          "Your answer didn't make it clear what specific task to create. " +
+          "Could you state the exact deliverable and deadline (if any) in one sentence?";
+
+        await supabaseAdmin
+          .from("clarifications")
+          .update({ question: sharpQuestion, answer: null })
+          .eq("id", id);
+
+        return NextResponse.json({
+          status: "still_unclear",
+          follow_up_question: sharpQuestion,
+        });
       }
       break;
     }
@@ -205,13 +243,30 @@ export async function PATCH(req: NextRequest) {
           .eq("user_id", userId);
 
         resultingTaskId = targetId;
+        safeToClose = true;
+      } else {
+        // AI said task_update but couldn't pinpoint which task — re-ask
+        const sharpQuestion =
+          reanalysis.clarifying_question ??
+          "Which existing task does this update relate to? Please name it specifically.";
+
+        await supabaseAdmin
+          .from("clarifications")
+          .update({ question: sharpQuestion, answer: null })
+          .eq("id", id);
+
+        return NextResponse.json({
+          status: "still_unclear",
+          follow_up_question: sharpQuestion,
+        });
       }
       break;
     }
 
     case "no_action":
     case "fyi_only": {
-      // User clarified that there's nothing to do — mark email processed
+      // User explicitly confirmed there is nothing to do — safe to close
+      safeToClose = true;
       if (clarif.email_id) {
         await supabaseAdmin
           .from("emails")
@@ -223,13 +278,28 @@ export async function PATCH(req: NextRequest) {
     }
 
     case "needs_clarification": {
-      // Still ambiguous even after user input — update the clarification question
-      // rather than resolving it, so the user can try again
+      // Still ambiguous after user input — update question and re-present.
+      // Also refresh candidate_tasks so the next card round still has tappable options.
+      const freshCandidates: { id: string; title: string }[] = (
+        reanalysis.candidate_task_ids ?? []
+      )
+        .slice(0, 4)
+        .map((cid) => tasks.find((t) => t.id === cid))
+        .filter((t): t is Task => t !== undefined)
+        .map((t) => ({ id: t.id, title: t.title }));
+
+      // Merge with existing context, only overwriting candidate_tasks and question
+      const updatedContext = {
+        ...(clarif.context ?? {}),
+        candidate_tasks: freshCandidates,
+      };
+
       await supabaseAdmin
         .from("clarifications")
         .update({
           question: reanalysis.clarifying_question ?? clarif.question,
           answer: null,
+          context: updatedContext,
         })
         .eq("id", id);
 
@@ -238,6 +308,45 @@ export async function PATCH(req: NextRequest) {
         follow_up_question: reanalysis.clarifying_question,
       });
     }
+
+
+    default: {
+      // Unexpected or malformed AI result — never silently close.
+      // Surface a follow-up question so work is not lost.
+      const fallbackQuestion =
+        "Robin couldn't interpret your answer confidently. " +
+        "Could you describe the exact task (or confirm there's nothing to do)?";
+
+      await supabaseAdmin
+        .from("clarifications")
+        .update({ question: fallbackQuestion, answer: null })
+        .eq("id", id);
+
+      return NextResponse.json({
+        status: "still_unclear",
+        follow_up_question: fallbackQuestion,
+      });
+    }
+  }
+
+  // Final guard: only close the clarification if we produced a definitive outcome.
+  // This is the structural fix for the silent-close bug — even if somehow the
+  // switch falls through without setting safeToClose, we never mark "answered".
+  if (!safeToClose) {
+    const fallbackQuestion =
+      reanalysis.clarifying_question ??
+      "We couldn't create or update a task from your answer. " +
+      "What specifically needs to be done, and by when?";
+
+    await supabaseAdmin
+      .from("clarifications")
+      .update({ question: fallbackQuestion, answer: null })
+      .eq("id", id);
+
+    return NextResponse.json({
+      status: "still_unclear",
+      follow_up_question: fallbackQuestion,
+    });
   }
 
   // Mark clarification as answered

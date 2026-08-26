@@ -36,6 +36,8 @@ export interface Task {
   gmail_thread_id: string | null;
   extraction_confidence: number | null;
   needs_review: boolean;
+  /** Short phrase describing what external event this task is waiting on. Null = actionable now. */
+  waiting_on: string | null;
   created_at: string;
   updated_at: string;
   // Computed at query time — not stored in DB
@@ -115,6 +117,10 @@ export interface EmailAnalysis {
   matched_task_id: string | null;
   duplicate_of_task_id: string | null;
   depends_on_task_ids: string[];
+  /** IDs of open tasks that plausibly match when classification=needs_clarification due to ambiguity. Max 4, ordered most-likely first. */
+  candidate_task_ids: string[];
+  /** Short phrase describing what external event this task is waiting on. Null if not contingent. */
+  waiting_on: string | null;
   clarifying_question: string | null;
 }
 

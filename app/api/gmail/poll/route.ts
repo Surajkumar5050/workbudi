@@ -181,6 +181,7 @@ async function processOneEmail({
           gmail_thread_id: emailData.thread_id,
           extraction_confidence: analysis.confidence,
           needs_review: needsReview,
+          waiting_on: analysis.waiting_on ?? null,
           // #2: use deterministically inferred goal_id — never null just because the LLM didn't output one
           goal_id: analysis.inferred_goal_id ?? null,
         })
@@ -212,6 +213,7 @@ async function processOneEmail({
               analysis.clarifying_question ??
               `I think this email updates an existing task but couldn't confirm which one. Which task does "${emailData.subject}" relate to?`,
           },
+          tasks,
           pendingClarificationThreadIds,
         });
         break;
@@ -242,6 +244,8 @@ async function processOneEmail({
         updatePayload.needs_review = true;
         updatePayload.extraction_confidence = analysis.confidence;
       }
+      // Pass through waiting_on if the AI detected a contingency
+      if ("waiting_on" in analysis) updatePayload.waiting_on = analysis.waiting_on ?? null;
 
       await supabaseAdmin
         .from("tasks")
@@ -261,6 +265,7 @@ async function processOneEmail({
         userId,
         emailData,
         analysis,
+        tasks,
         pendingClarificationThreadIds,
       });
       emailProcessed = false;
@@ -313,6 +318,7 @@ async function createClarificationIfNeeded({
   userId,
   emailData,
   analysis,
+  tasks,
   pendingClarificationThreadIds,
 }: {
   userId: string;
@@ -329,7 +335,9 @@ async function createClarificationIfNeeded({
     task_title?: string | null;
     confidence?: number;
     inferred_goal_id?: string | null;
+    candidate_task_ids?: string[];
   };
+  tasks: Task[];
   pendingClarificationThreadIds: Set<string>;
 }) {
   // #3: Dedup — skip if a pending clarification already exists for this thread
@@ -344,7 +352,17 @@ async function createClarificationIfNeeded({
     analysis.clarifying_question ??
     `I received an email about "${emailData.subject}" but I'm not sure what action to take. What should I do with this?`;
 
+  // Resolve candidate_task_ids → [{id, title}], silently dropping any ID not found in tasks
+  const resolvedCandidates: { id: string; title: string }[] = (
+    analysis.candidate_task_ids ?? []
+  )
+    .slice(0, 4)
+    .map((cid) => tasks.find((t) => t.id === cid))
+    .filter((t): t is Task => t !== undefined)
+    .map((t) => ({ id: t.id, title: t.title }));
+
   const context = {
+    candidate_tasks: resolvedCandidates, // always present, may be empty array
     draft_extraction: {
       task_title: analysis.task_title,
       confidence: analysis.confidence,
@@ -352,6 +370,7 @@ async function createClarificationIfNeeded({
     thread_snippet: emailData.body_snippet.slice(0, 300),
     reasoning: analysis.reasoning,
   };
+
 
   const { data: clarification } = await supabaseAdmin
     .from("clarifications")

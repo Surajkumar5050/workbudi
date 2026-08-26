@@ -133,6 +133,7 @@ export async function POST() {
                     gmail_thread_id: email.thread_id,
                     extraction_confidence: analysis.confidence,
                     needs_review: analysis.confidence < 0.75,
+                    waiting_on: analysis.waiting_on ?? null,
                     goal_id: analysis.inferred_goal_id ?? null,
                   })
                   .select()
@@ -174,11 +175,21 @@ export async function POST() {
                 analysis.clarifying_question ??
                 `I received an email about "${email.subject}" but I'm not sure what action to take. What should I do?`;
 
+              // Resolve candidate_task_ids → [{id, title}], silently dropping any ID not found in tasks
+              const resolvedCandidates: { id: string; title: string }[] = (
+                (analysis.candidate_task_ids ?? []) as string[]
+              )
+                .slice(0, 4)
+                .map((cid: string) => tasks.find((t) => t.id === cid))
+                .filter((t): t is Task => t !== undefined)
+                .map((t) => ({ id: t.id, title: t.title }));
+
               await supabaseAdmin.from("clarifications").insert({
                 user_id: userId,
                 thread_id: email.thread_id,
                 question,
                 context: {
+                  candidate_tasks: resolvedCandidates,
                   thread_snippet: email.body_snippet.slice(0, 300),
                   reasoning: analysis.reasoning,
                 },

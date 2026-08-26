@@ -66,7 +66,7 @@ export async function PATCH(req: NextRequest) {
   const { id, ...updates } = body;
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
 
-  const allowed = ["title", "description", "priority", "status", "deadline", "goal_id", "needs_review"];
+  const allowed = ["title", "description", "priority", "status", "deadline", "goal_id", "needs_review", "waiting_on"];
   const filtered: Record<string, unknown> = {};
   for (const key of allowed) {
     if (key in updates) {

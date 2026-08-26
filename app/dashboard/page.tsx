@@ -186,6 +186,21 @@ export default function DashboardPage() {
     }
   }
 
+  async function acknowledgeReview(id: string) {
+    const res = await fetch("/api/tasks", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, needs_review: false }),
+    });
+    if (res.ok) {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, needs_review: false } : t))
+      );
+    } else {
+      setError("Could not acknowledge task.");
+    }
+  }
+
   // Kanban columns include "cancelled" for visibility
   const cols: { key: TaskStatus; label: string; dimmed?: boolean }[] = [
     { key: "todo", label: "To Do" },
@@ -523,6 +538,7 @@ export default function DashboardPage() {
                         onEdit={openEdit}
                         onDelete={deleteTask}
                         onStatus={updateStatus}
+                        onReview={acknowledgeReview}
                       />
                     ))}
                     {colTasks.length === 0 && (
@@ -713,10 +729,12 @@ function ClarificationCard({
 }) {
   const [freeText, setFreeText] = useState("");
   const [answering, setAnswering] = useState(false);
+  const [showReasoning, setShowReasoning] = useState(false);
 
   const candidateTasks: { id: string; title: string }[] =
     clarification.context?.candidate_tasks ?? [];
   const threadSnippet = clarification.context?.thread_snippet as string | undefined;
+  const reasoning = clarification.context?.reasoning as string | undefined;
 
   async function handleAnswer(answer: string) {
     setAnswering(true);
@@ -776,6 +794,40 @@ function ClarificationCard({
           }}
         >
           "{threadSnippet.slice(0, 220)}{threadSnippet.length > 220 ? "…" : ""}"
+        </div>
+      )}
+
+      {/* Reasoning disclosure toggle */}
+      {reasoning && (
+        <div>
+          <button
+            onClick={() => setShowReasoning((v) => !v)}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontSize: 11,
+              color: "var(--text-secondary)",
+              padding: 0,
+              textDecoration: "underline dotted",
+            }}
+          >
+            {showReasoning ? "▾" : "▸"} Why am I being asked this?
+          </button>
+          {showReasoning && (
+            <p
+              style={{
+                fontSize: 11,
+                color: "var(--text-secondary)",
+                marginTop: 5,
+                lineHeight: 1.5,
+                fontStyle: "italic",
+                paddingLeft: 12,
+              }}
+            >
+              {reasoning}
+            </p>
+          )}
         </div>
       )}
 
@@ -850,12 +902,14 @@ function TaskCard({
   onEdit,
   onDelete,
   onStatus,
+  onReview,
 }: {
   task: Task;
   goals: Goal[];
   onEdit: (t: Task) => void;
   onDelete: (id: string) => void;
   onStatus: (id: string, s: TaskStatus) => void;
+  onReview: (id: string) => void;
 }) {
   const goal = goals.find((g) => g.id === task.goal_id);
   const isOverdue =
@@ -971,21 +1025,57 @@ function TaskCard({
             {(task.blocking_task_titles ?? []).length > 1 && ` +${(task.blocking_task_titles ?? []).length - 1}`}
           </span>
         )}
-        {/* Needs review badge */}
-        {task.needs_review && (
+        {/* Waiting-on badge */}
+        {task.waiting_on && (
           <span
             style={{
               fontSize: 10,
-              background: "rgba(234,179,8,0.12)",
-              color: "#ca8a04",
+              background: "rgba(59,130,246,0.10)",
+              color: "#2563eb",
               padding: "2px 8px",
               borderRadius: 20,
               fontWeight: 500,
+              maxWidth: 220,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
-            title="Robin extracted this with low confidence — verify the details"
+            title={`Waiting on: ${task.waiting_on}`}
           >
-            ⚠ Review
+            ⏳ Waiting: {task.waiting_on.length > 32 ? task.waiting_on.slice(0, 32) + "…" : task.waiting_on}
           </span>
+        )}
+        {/* Needs review badge + one-click Looks right button */}
+        {task.needs_review && (
+          <>
+            <span
+              style={{
+                fontSize: 10,
+                background: "rgba(234,179,8,0.12)",
+                color: "#ca8a04",
+                padding: "2px 8px",
+                borderRadius: 20,
+                fontWeight: 500,
+              }}
+              title="Robin extracted this with low confidence — verify the details"
+            >
+              ⚠ Review
+            </span>
+            <button
+              className="btn btn-ghost"
+              style={{
+                fontSize: 10,
+                padding: "2px 9px",
+                borderRadius: 20,
+                color: "#16a34a",
+                border: "1px solid rgba(22,163,74,0.35)",
+              }}
+              title="Confirm this task looks correct"
+              onClick={() => onReview(task.id)}
+            >
+              ✓ Looks right
+            </button>
+          </>
         )}
       </div>
 
