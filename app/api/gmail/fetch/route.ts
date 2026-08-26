@@ -219,9 +219,14 @@ export async function POST() {
         controller.close();
       } catch (err: unknown) {
         console.error("Error in Gmail fetch stream:", err);
+        const errMsg =
+          err instanceof Error && err.message.includes("Google account not linked")
+            ? "Your Google session is out of sync. Please click 'Sign out' and sign back in to reconnect Gmail."
+            : "Failed while fetching from Gmail. Please try again.";
+
         sendEvent({
           type: "error",
-          message: "Failed while fetching from Gmail. Please try again.",
+          message: errMsg,
         });
         controller.close();
       }
