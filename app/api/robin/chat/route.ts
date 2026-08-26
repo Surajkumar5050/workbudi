@@ -1,7 +1,7 @@
 import { auth } from "@/auth";
 import { supabaseAdmin } from "@/lib/supabase";
 import { chatWithRobin } from "@/lib/gemini";
-import { executeRobinAction } from "@/lib/tools";
+import { executeRobinAction, computeBlockedStatus } from "@/lib/tools";
 import { NextRequest } from "next/server";
 import { RobinMessage, RobinAction } from "@/types";
 
@@ -84,12 +84,21 @@ export async function POST(req: NextRequest) {
         ]);
 
         const goals = goalsRes.data ?? [];
-        const tasks = tasksRes.data ?? [];
+        const rawTasks = tasksRes.data ?? [];
 
-        // Real-time Phase 2: Querying Gmail Context
+        // Real-time Phase 2: Computing dependency / blocked status
         sendEvent({
           type: "status",
-          message: `📧 Loading Gmail context (${tasks.length} tasks, ${goals.length} goals found)...`,
+          message: `🔗 Checking task dependencies (${rawTasks.length} tasks)...`,
+        });
+
+        const tasks = await computeBlockedStatus(rawTasks, userId);
+        const blockedCount = tasks.filter((t) => t.blocked).length;
+
+        // Real-time Phase 3: Querying Gmail Context
+        sendEvent({
+          type: "status",
+          message: `📧 Loading Gmail context (${tasks.length} tasks, ${goals.length} goals, ${blockedCount} blocked)...`,
         });
 
         const emailsRes = await supabaseAdmin
@@ -101,10 +110,10 @@ export async function POST(req: NextRequest) {
 
         const recentEmails = emailsRes.data ?? [];
 
-        // Real-time Phase 3: Gemini AI Reasoning
+        // Real-time Phase 4: Gemini AI Reasoning
         sendEvent({
           type: "status",
-          message: `🧠 Gemini AI is analyzing priorities across ${tasks.length} tasks & ${recentEmails.length} emails…`,
+          message: `🧠 Robin is analyzing priorities across ${tasks.length} tasks & ${recentEmails.length} emails…`,
         });
 
         const context = {
@@ -130,7 +139,7 @@ export async function POST(req: NextRequest) {
           // Ignore if table not created
         }
 
-        // Real-time Phase 4: Sending Final Response
+        // Real-time Phase 5: Sending Final Response
         sendEvent({
           type: "result",
           reply,

@@ -1,12 +1,12 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { ExtractedTaskData, RobinContext, RobinAction, Task } from "@/types";
+import { EmailAnalysis, RobinContext, RobinAction, Task, Goal, ThreadMessage, Clarification } from "@/types";
 import fs from "fs";
 import path from "path";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 const MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"];
-const REQUEST_TIMEOUT_MS = 4000;
+const REQUEST_TIMEOUT_MS = 8000; // Raised from 4000 — two-pass extraction can take longer
 
 // ── Load Robin's system prompt from the dedicated .md file ──────────────────
 const ROBIN_SYSTEM_PROMPT = fs.readFileSync(
@@ -49,77 +49,274 @@ async function generateWithFallback(
   throw lastError ?? new Error("All Gemini models unavailable");
 }
 
-// ── Email task extraction ────────────────────────────────────────────────────
-export async function extractTaskFromEmail(
-  emailSubject: string,
-  emailBody: string,
+// ── Degraded-mode fallback (Gemini fully down) ───────────────────────────────
+// When the AI is unavailable, we NEVER silently create/skip tasks — we always
+// create a clarification row instead, which is safer than making irreversible
+// guesses.
+function degradedModeAnalysis(): EmailAnalysis {
+  return {
+    classification: "needs_clarification",
+    confidence: 0,
+    reasoning: "Gemini API unavailable — degraded mode, deferring to human review",
+    task_title: null,
+    description: null,
+    deadline: null,
+    priority: null,
+    status_change: null,
+    matched_task_id: null,
+    duplicate_of_task_id: null,
+    depends_on_task_ids: [],
+    clarifying_question:
+      "Robin couldn't analyze this email (AI temporarily unavailable). " +
+      "Is this something that needs action? If so, what should be done?",
+  };
+}
+
+// ── Pass 1: Full contextual classification ───────────────────────────────────
+async function classifyEmail(
+  threadMessages: ThreadMessage[],
   existingTasks: Task[],
-  threadTask?: Task
-): Promise<ExtractedTaskData> {
+  goals: Goal[],
+  openClarifications: Clarification[]
+): Promise<EmailAnalysis> {
   const today = new Date().toISOString().split("T")[0];
 
-  const taskList = existingTasks
-    .slice(0, 15)
+  // Build the thread transcript (oldest→newest)
+  const threadSection = threadMessages
+    .map(
+      (m, i) =>
+        `[Message ${i + 1}] From: ${m.from}\nDate: ${m.date}\nSubject: ${m.subject}\n${m.body.slice(0, 600)}`
+    )
+    .join("\n\n---\n\n");
+
+  // All open tasks (not done, not cancelled) — no slice cap at this stage
+  const openTasks = existingTasks.filter(
+    (t) => t.status !== "done" && t.status !== "cancelled"
+  );
+  const taskList = openTasks
     .map(
       (t) =>
-        `- ID: ${t.id} | Title: "${t.title}" | Priority: ${t.priority} | Deadline: ${t.deadline ?? "none"}`
+        `- ID: ${t.id} | Title: "${t.title}" | Priority: ${t.priority} | Status: ${t.status} | Deadline: ${t.deadline ?? "none"} | ThreadId: ${t.gmail_thread_id ?? "none"}`
     )
+    .join("\n") || "None";
+
+  const goalsList = goals
+    .map((g) => `- ID: ${g.id} | Title: "${g.title}" | Kind: ${g.kind ?? "goal"}`)
+    .join("\n") || "None";
+
+  // Surface any open clarifications for this same thread so we can recognize
+  // a reply to a clarifying question
+  const pendingClarifications = openClarifications
+    .filter((c) => c.status === "pending")
+    .map(
+      (c) =>
+        `- Clarification ID: ${c.id} | Question asked: "${c.question}" | Thread: ${c.thread_id ?? "unknown"}`
+    )
+    .join("\n") || "None";
+
+  const systemInstruction = `You are Robin's email analysis engine inside WorkBudi.
+Today is ${today}. Convert ALL relative dates (\"by Friday\", \"end of next week\", \"tomorrow\") to absolute YYYY-MM-DD.
+
+## Your job
+Read the full email thread and return a single JSON object matching the EmailAnalysis schema below.
+You MUST base your decision on the entire thread, not just the last message.
+
+## Classification rules (apply in order)
+1. "no_action" — automated notifications, receipts, newsletters, tracking emails, calendar invites with no ask, out-of-office replies, CC-only informational forwards where no work is expected.
+2. "fyi_only" — a human wrote this, it contains information, but no work is requested. E.g. "Heads up, the meeting moved." "Thanks, got it!" "Just wanted to let you know."
+3. "needs_clarification" — set this INSTEAD OF guessing when ANY of these are true:
+   - The email references "the project", "that thing we discussed", "the proposal" etc. with 2 or more plausible task matches in the existing task list
+   - It's genuinely unclear whether this is new work or an update to an existing task and confidence would be < 0.65
+   - A deadline or priority is implied but too vague to act on ("soon", "when you get a chance", "ASAP" without context)
+   - The email is a reply in a thread where you previously created a clarification (check pendingClarifications)
+4. "task_update" — prefer this over "new_task" when the email plausibly continues an existing task's topic AND you have ≥ 0.65 confidence in the match. Use matched_task_id to point to the exact task. Recognized update signals: deadline change, status change ("done", "drop this", "never mind"), priority escalation, same-thread reply.
+5. "new_task" — only when this is genuinely new work unrelated to any existing task AND you are confident enough to act (confidence ≥ 0.65). NEVER fabricate a matched_task_id that isn't in the provided task list.
+
+## Dependency detection
+Look for language like "once X ships", "after the contract is signed", "blocked on legal", "when design approves". When found, set depends_on_task_ids to the IDs of the matching tasks from the task list.
+
+## Output schema (return ONLY raw JSON, no markdown fences, no commentary)
+{
+  "classification": "no_action" | "fyi_only" | "new_task" | "task_update" | "needs_clarification",
+  "confidence": 0.0-1.0,
+  "reasoning": "brief internal trail — what signals drove your decision",
+  "task_title": string | null,
+  "description": string | null,
+  "deadline": "YYYY-MM-DD" | null,
+  "priority": "high" | "medium" | "low" | null,
+  "status_change": "todo" | "in-progress" | "done" | "cancelled" | null,
+  "matched_task_id": string | null,
+  "duplicate_of_task_id": string | null,
+  "depends_on_task_ids": [],
+  "clarifying_question": string | null
+}`;
+
+  const prompt = `=== FULL EMAIL THREAD ===
+${threadSection}
+
+=== OPEN TASKS IN WORKSPACE ===
+${taskList}
+
+=== GOALS / PROJECTS ===
+${goalsList}
+
+=== PENDING CLARIFICATIONS (same threads) ===
+${pendingClarifications}`;
+
+  const text = await generateWithFallback(prompt, systemInstruction);
+  const clean = text.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
+  return JSON.parse(clean) as EmailAnalysis;
+}
+
+// ── Pass 2: Narrow dedup confirmation ────────────────────────────────────────
+// Only called when Pass 1 returns "new_task". A cheap yes/no check to make
+// sure we're not creating a duplicate. More reliable than trusting a single
+// LLM call under time pressure.
+async function confirmNotDuplicate(
+  candidateTitle: string,
+  candidateDescription: string | null,
+  openTasks: Task[]
+): Promise<{ isDuplicate: boolean; duplicateOfId: string | null }> {
+  if (openTasks.length === 0) return { isDuplicate: false, duplicateOfId: null };
+
+  const taskList = openTasks
+    .map((t) => `- ID: ${t.id} | Title: "${t.title}"`)
     .join("\n");
 
-  const threadHint = threadTask
-    ? `\nIMPORTANT: An existing task from this Gmail thread already exists: ID=${threadTask.id}, Title="${threadTask.title}". This email is an update/reply to it — do NOT create a duplicate.`
-    : "";
+  const systemInstruction = `You are a deduplication guard for a task management system.
+Your only job: determine if the candidate work item is substantially the same piece of work as any task in the provided list.
+"Substantially the same" means the same underlying deliverable — even if the subject line, sender, or phrasing differs.
+Respond ONLY with raw JSON: {"is_duplicate": true|false, "duplicate_of_id": "uuid"|null}`;
 
-  const systemInstruction = `You are WorkBudi's work extraction & deduplication engine.
-Your job is to read an inbound email and output structured JSON describing actionable work items and changes.
-Today is ${today}. Convert all relative deadline references (e.g. "by Friday", "end of next week", "tomorrow") to absolute YYYY-MM-DD dates.
+  const prompt = `Candidate task:
+Title: "${candidateTitle}"
+Description: "${candidateDescription ?? "(none)"}"
 
-CRITICAL DEDUPLICATION & UPDATE RULES:
-1. Compare this email against the provided "Existing Tasks" list.
-2. If this email refers to, follows up on, updates, changes the deadline of, or modifies the priority of ANY existing task (even across separate emails with similar subjects or topics like "Proposal", "Pitch Deck", "Bug", etc.), you MUST set:
-   - "is_update_to_existing": true
-   - "matched_task_id": "<exact ID of the matching task from Existing Tasks>"
-   - "deadline": updated deadline if mentioned (or null if unchanged)
-   - "priority": updated priority if urgency changed (or null if unchanged)
-3. If it is genuinely brand new work unrelated to any existing task, set "is_update_to_existing": false and "matched_task_id": null.
-4. Respond ONLY with raw JSON — no markdown code fences, no commentary.
-
-Schema: {"has_task":bool,"task_title":string|null,"deadline":"YYYY-MM-DD"|null,"priority":"high"|"medium"|"low"|null,"is_update_to_existing":bool,"matched_task_id":string|null,"context_summary":string}`;
-
-  const prompt = `${threadHint ? threadHint + "\n" : ""}Email Subject: ${emailSubject}
-Email Body: ${emailBody.slice(0, 800)}
-
-Existing Tasks in Workspace:
-${taskList || "None"}`;
+Existing open tasks:
+${taskList}`;
 
   try {
     const text = await generateWithFallback(prompt, systemInstruction);
     const clean = text.replace(/^```json\n?/, "").replace(/\n?```$/, "").trim();
-    return JSON.parse(clean) as ExtractedTaskData;
-  } catch {
-    // Keyword-based heuristic fallback
-    const subLower = emailSubject.toLowerCase();
-    const bodyLower = emailBody.toLowerCase();
-    const isUrgent =
-      subLower.includes("urgent") || bodyLower.includes("today") || bodyLower.includes("asap");
-    const isActionable =
-      subLower.includes("proposal") ||
-      subLower.includes("review") ||
-      subLower.includes("action") ||
-      subLower.includes("invoice") ||
-      subLower.includes("update") ||
-      bodyLower.includes("can you") ||
-      bodyLower.includes("please");
-
+    const result = JSON.parse(clean) as { is_duplicate: boolean; duplicate_of_id: string | null };
     return {
-      has_task: isActionable,
-      task_title: isActionable ? emailSubject.replace(/^Re:\s*/i, "").trim() : null,
-      deadline: null,
-      priority: isUrgent ? "high" : "medium",
-      is_update_to_existing: !!threadTask,
-      matched_task_id: threadTask?.id ?? null,
-      context_summary: emailSubject,
+      isDuplicate: result.is_duplicate,
+      duplicateOfId: result.duplicate_of_id,
     };
+  } catch {
+    // If dedup check fails, be conservative: allow the new task through
+    return { isDuplicate: false, duplicateOfId: null };
+  }
+}
+
+// ── Public API: analyzeInboundEmail ──────────────────────────────────────────
+/**
+ * Analyzes an inbound email using its full thread context plus all open tasks,
+ * goals, and any open clarifications for the same thread.
+ *
+ * Two-pass approach:
+ *   Pass 1 — full contextual classification
+ *   Pass 2 — narrow dedup confirmation (only when Pass 1 → "new_task")
+ *
+ * Post-pass guardrails (deterministic, no LLM trust required):
+ *   - matched_task_id is validated against the actual task list (#5)
+ *   - goal_id is inferred by keyword overlap with goal titles (#2)
+ *
+ * When Gemini is fully down, returns needs_clarification (degraded mode).
+ */
+export async function analyzeInboundEmail(params: {
+  threadMessages: ThreadMessage[];
+  existingTasks: Task[];
+  goals: Goal[];
+  openClarifications: Clarification[];
+}): Promise<EmailAnalysis & { inferred_goal_id?: string | null }> {
+  const { threadMessages, existingTasks, goals, openClarifications } = params;
+
+  try {
+    // Pass 1: Full classification
+    const analysis = await classifyEmail(
+      threadMessages,
+      existingTasks,
+      goals,
+      openClarifications
+    );
+
+    // Pass 2: Dedup guard — only runs when Pass 1 thinks this is new work
+    if (analysis.classification === "new_task" && analysis.task_title) {
+      const openTasks = existingTasks.filter(
+        (t) => t.status !== "done" && t.status !== "cancelled"
+      );
+      const { isDuplicate, duplicateOfId } = await confirmNotDuplicate(
+        analysis.task_title,
+        analysis.description,
+        openTasks
+      );
+
+      if (isDuplicate && duplicateOfId) {
+        // Promote to task_update rather than creating a duplicate
+        analysis.classification = "task_update";
+        analysis.matched_task_id = duplicateOfId;
+        analysis.duplicate_of_task_id = duplicateOfId;
+        analysis.reasoning += ` [Dedup pass: matched to existing task ${duplicateOfId}]`;
+      }
+    }
+
+    // ── Guardrail #5: matched_task_id code-level enforcement ─────────────────
+    // The LLM can hallucinate IDs that aren't in the task list we sent.
+    // If matched_task_id isn't in existingTasks, force needs_clarification
+    // rather than silently updating or ignoring a phantom task.
+    if (
+      analysis.matched_task_id &&
+      !existingTasks.find((t) => t.id === analysis.matched_task_id)
+    ) {
+      console.warn(
+        `[Gemini] matched_task_id ${analysis.matched_task_id} not in task list — forcing needs_clarification`
+      );
+      analysis.classification = "needs_clarification";
+      analysis.matched_task_id = null;
+      analysis.clarifying_question =
+        analysis.clarifying_question ??
+        `I couldn't confidently match this email to an existing task. Which task does "${
+          analysis.task_title ?? "this email"
+        }" relate to, or is it new work?`;
+      analysis.reasoning += " [Guardrail: matched_task_id not in provided task list]";
+    }
+
+    // ── Guardrail #2: goal_id inference (deterministic keyword overlap) ───────
+    // The LLM doesn't output a goal_id, so we infer one here by checking
+    // whether the task title/description keywords overlap with any goal title.
+    // This is a best-effort heuristic — no goal linked is better than a wrong one.
+    let inferred_goal_id: string | null = null;
+    const searchText = [
+      analysis.task_title ?? "",
+      analysis.description ?? "",
+      // Also check the thread subject line (first message is oldest)
+      threadMessages[threadMessages.length - 1]?.subject ?? "",
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    if (searchText.trim() && goals.length > 0) {
+      // Score each goal by how many of its title words appear in searchText
+      const scored = goals
+        .filter((g) => g.title.trim().length > 2)
+        .map((g) => {
+          const goalWords = g.title.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+          const matches = goalWords.filter((w) => searchText.includes(w)).length;
+          return { id: g.id, matches };
+        })
+        .filter((s) => s.matches > 0)
+        .sort((a, b) => b.matches - a.matches);
+
+      if (scored.length > 0) {
+        inferred_goal_id = scored[0].id;
+      }
+    }
+
+    return { ...analysis, inferred_goal_id };
+  } catch (err) {
+    console.error("[Gemini] analyzeInboundEmail failed \u2014 entering degraded mode:", err);
+    return { ...degradedModeAnalysis(), inferred_goal_id: null };
   }
 }
 
@@ -209,7 +406,7 @@ function localRobinReasoning(
 
   // Delete task intent
   if (msg.includes("delete task") || msg.includes("remove task")) {
-    const activeTasks = context.tasks.filter((t) => t.status !== "done");
+    const activeTasks = context.tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
     const targetTask = activeTasks[0] ?? context.tasks[0];
     return {
       reply: targetTask
@@ -239,19 +436,21 @@ function localRobinReasoning(
     };
   }
 
-  // General prioritization
-  const activeTasks = context.tasks.filter((t) => t.status !== "done");
-  const highPriority = activeTasks.filter((t) => t.priority === "high");
-  const mediumPriority = activeTasks.filter((t) => t.priority === "medium");
+  // General prioritization (dependency-aware)
+  const activeTasks = context.tasks.filter((t) => t.status !== "done" && t.status !== "cancelled");
+  const unblockedTasks = activeTasks.filter((t) => !t.blocked);
+  const blockedTasks = activeTasks.filter((t) => t.blocked);
+  const highPriority = unblockedTasks.filter((t) => t.priority === "high");
+  const mediumPriority = unblockedTasks.filter((t) => t.priority === "medium");
 
   if (activeTasks.length === 0) {
     return {
-      reply: `You have no active tasks right now! 🎉\n\nHead to **Workspace** to add goals and tasks, or click **Fetch Emails** to let WorkBudi extract tasks from your Gmail inbox.`,
+      reply: `You have no active tasks right now! 🎉\n\nHead to **Workspace** to add goals and tasks, or click **Fetch Emails** to let Robin extract tasks from your Gmail inbox.`,
       action: null,
     };
   }
 
-  const topTask = highPriority[0] || mediumPriority[0] || activeTasks[0];
+  const topTask = highPriority[0] || mediumPriority[0] || unblockedTasks[0] || activeTasks[0];
   const linkedGoal = context.goals.find((g) => g.id === topTask.goal_id);
 
   let reply = `Here is what I recommend focusing on right now:\n\n`;
@@ -262,11 +461,20 @@ function localRobinReasoning(
   reply += `\n**Why:** `;
   reply +=
     topTask.priority === "high"
-      ? `This is your most urgent item right now.`
+      ? `This is your most urgent unblocked item right now.`
       : `This is next in your priority queue.`;
 
-  if (activeTasks.length > 1) {
-    const rest = activeTasks.filter((t) => t.id !== topTask.id).slice(0, 3);
+  // Surface blocked tasks as context (not as recommendations)
+  if (blockedTasks.length > 0) {
+    reply += `\n\n**⛔ Blocked (waiting on dependencies):**\n`;
+    reply += blockedTasks
+      .slice(0, 3)
+      .map((t) => `• ${t.title} — blocked by: ${(t.blocking_task_titles ?? []).join(", ")}`)
+      .join("\n");
+  }
+
+  if (unblockedTasks.length > 1) {
+    const rest = unblockedTasks.filter((t) => t.id !== topTask.id).slice(0, 3);
     reply += `\n\n**Also in queue:**\n` + rest.map((t) => `• ${t.title} (${t.priority})`).join("\n");
   }
 
@@ -283,14 +491,19 @@ export async function chatWithRobin(
 
   // Build structured context blocks
   const goalsSection = context.goals
-    .map((g) => `- ${g.title}${g.description ? `: ${g.description}` : ""}`)
+    .map((g) => `- [${g.id}] ${g.title}${g.description ? `: ${g.description}` : ""} [${g.kind ?? "goal"}]`)
     .join("\n") || "None";
 
   const tasksSection = context.tasks
-    .slice(0, 12)
+    .slice(0, 20)
     .map(
-      (t) =>
-        `- [${t.id}] ${t.title} | priority: ${t.priority} | status: ${t.status} | deadline: ${t.deadline ?? "none"}`
+      (t) => {
+        const blockedNote = t.blocked
+          ? ` | BLOCKED by: ${(t.blocking_task_titles ?? []).join(", ")}`
+          : "";
+        const reviewNote = t.needs_review ? " | ⚠ needs-review" : "";
+        return `- [${t.id}] ${t.title} | priority: ${t.priority} | status: ${t.status} | deadline: ${t.deadline ?? "none"}${blockedNote}${reviewNote}`;
+      }
     )
     .join("\n") || "None";
 
@@ -310,7 +523,7 @@ export async function chatWithRobin(
   // Assemble the user-turn context prompt
   const contextPrompt = `WORKSPACE CONTEXT (Today: ${today})
 
-=== USER GOALS ===
+=== USER GOALS / PROJECTS ===
 ${goalsSection}
 
 === TASKS IN DATABASE ===

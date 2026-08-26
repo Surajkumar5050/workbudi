@@ -1,5 +1,8 @@
 import { supabaseAdmin } from "./supabase";
-import { RobinAction, Priority, TaskStatus } from "@/types";
+import { RobinAction, Priority, TaskStatus, Task } from "@/types";
+
+// Narrow shape returned by the Supabase dependency select (only these two columns)
+type DepRow = { task_id: string; depends_on_task_id: string };
 
 function normalizeStatus(statusRaw: unknown): TaskStatus | null {
   if (typeof statusRaw !== "string") return null;
@@ -18,6 +21,7 @@ function normalizeStatus(statusRaw: unknown): TaskStatus | null {
     return "in-progress";
   }
   if (s === "done" || s === "completed" || s === "finished" || s === "resolved") return "done";
+  if (s === "cancelled" || s === "canceled" || s === "dropped" || s === "closed") return "cancelled";
   return null;
 }
 
@@ -81,6 +85,117 @@ async function resolveTaskId(
   if (anyTodo) return anyTodo.id;
 
   return allUserTasks[0].id;
+}
+
+/**
+ * Computes blocked status for a list of tasks by joining against task_dependencies.
+ * A task is blocked if it has at least one dependency whose depended-on task is
+ * not yet in 'done' status. This is deterministic — no LLM involvement.
+ *
+ * Mutates and returns the same array (adds .blocked and .blocking_task_titles).
+ */
+export async function computeBlockedStatus(tasks: Task[], userId: string): Promise<Task[]> {
+  if (tasks.length === 0) return tasks;
+
+  const taskIds = tasks.map((t) => t.id);
+
+  // Fetch all dependency rows where task_id is in our task set
+  const { data: depsRaw } = await supabaseAdmin
+    .from("task_dependencies")
+    .select("task_id, depends_on_task_id")
+    .in("task_id", taskIds);
+
+  const deps: DepRow[] = (depsRaw ?? []) as DepRow[];
+
+  if (deps.length === 0) {
+    // No dependencies — nothing is blocked
+    return tasks.map((t) => ({ ...t, blocked: false, blocking_task_titles: [] }));
+  }
+
+  // Build a quick lookup: taskId → task object
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
+
+  // For tasks with dependencies, also fetch the blocker tasks if they're not
+  // already in our list (e.g. dependency created by a different email session)
+  const blockerIds = deps
+    .map((d) => d.depends_on_task_id)
+    .filter((id) => !taskById.has(id));
+
+  if (blockerIds.length > 0) {
+    const { data: blockerTasks } = await supabaseAdmin
+      .from("tasks")
+      .select("id, title, status")
+      .in("id", blockerIds)
+      .eq("user_id", userId);
+    (blockerTasks ?? []).forEach((bt) => {
+      if (!taskById.has(bt.id)) taskById.set(bt.id, bt as Task);
+    });
+  }
+
+  return tasks.map((task) => {
+    const myDeps = deps.filter((d) => d.task_id === task.id);
+    if (myDeps.length === 0) {
+      return { ...task, blocked: false, blocking_task_titles: [] };
+    }
+
+    const blockers = myDeps
+      .map((d) => taskById.get(d.depends_on_task_id))
+      .filter(
+        (blocker): blocker is Task =>
+          blocker !== undefined && blocker.status !== "done" && blocker.status !== "cancelled"
+      );
+
+    return {
+      ...task,
+      blocked: blockers.length > 0,
+      blocking_task_titles: blockers.map((b) => b.title),
+    };
+  });
+}
+
+async function resolveGoalId(
+  rawGoalIdOrName: unknown,
+  userId: string,
+  hintText?: string
+): Promise<string | null> {
+  const { data: goals } = await supabaseAdmin
+    .from("goals")
+    .select("id, title")
+    .eq("user_id", userId);
+
+  if (!goals || goals.length === 0) return null;
+
+  const targetStr = typeof rawGoalIdOrName === "string" ? rawGoalIdOrName.trim().toLowerCase() : "";
+
+  if (targetStr && targetStr !== "undefined" && targetStr !== "null") {
+    // 1. Exact UUID match
+    const exact = goals.find((g) => g.id.toLowerCase() === targetStr);
+    if (exact) return exact.id;
+
+    // 2. Exact or substring title match
+    const titleMatch = goals.find(
+      (g) =>
+        g.title.toLowerCase() === targetStr ||
+        g.title.toLowerCase().includes(targetStr) ||
+        targetStr.includes(g.title.toLowerCase())
+    );
+    if (titleMatch) return titleMatch.id;
+  }
+
+  // 3. Match against hint text if provided (e.g. task title or action description)
+  if (hintText) {
+    const hintLower = hintText.toLowerCase();
+    const hintMatch = goals.find((g) => {
+      const words = g.title.toLowerCase().split(/\s+/).filter((w: string) => w.length > 3);
+      return (
+        words.some((w: string) => hintLower.includes(w)) ||
+        hintLower.includes(g.title.toLowerCase())
+      );
+    });
+    if (hintMatch) return hintMatch.id;
+  }
+
+  return null;
 }
 
 export async function executeRobinAction(
@@ -163,18 +278,20 @@ export async function executeRobinAction(
       const title = action.params.title || action.params.task_title || "New follow-up task";
       const priority = normalizePriority(action.params.priority) ?? "medium";
       const deadline = action.params.deadline || null;
-      const goal_id = action.params.goal_id || null;
+      const rawGoal = action.params.goal_id || action.params.goal || action.params.goal_name;
+      const resolvedGoalId = await resolveGoalId(rawGoal, userId, `${title} ${action.description}`);
 
       const { error } = await supabaseAdmin.from("tasks").insert({
         user_id: userId,
         title,
         priority,
         deadline,
-        goal_id,
+        goal_id: resolvedGoalId,
         status: "todo",
         source: "manual",
         description: null,
         gmail_thread_id: null,
+        needs_review: false,
       });
 
       return error
@@ -190,6 +307,7 @@ export async function executeRobinAction(
         user_id: userId,
         title,
         description,
+        kind: "goal",
       });
 
       return error

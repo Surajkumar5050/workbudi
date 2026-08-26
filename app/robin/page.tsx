@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import { RobinMessage, RobinAction, RobinChatSession } from "@/types";
 import Navbar from "@/components/Navbar";
 import { useSession } from "next-auth/react";
+import Link from "next/link";
 
 const GREETING: RobinMessage = {
   role: "assistant",
@@ -46,6 +47,7 @@ export default function RobinPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [liveStatus, setLiveStatus] = useState<string>("🔍 Contacting Robin AI…");
+  const [pendingClarificationCount, setPendingClarificationCount] = useState(0);
   const isSendingRef = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -84,6 +86,25 @@ export default function RobinPage() {
     setActiveSessionId(initial.id);
 
     return () => window.removeEventListener("resize", checkMobile);
+  }, []);
+
+  // Poll for pending clarifications (so the badge stays fresh)
+  useEffect(() => {
+    async function fetchClarifications() {
+      try {
+        const res = await fetch("/api/clarifications");
+        if (res.ok) {
+          const data = await res.json();
+          setPendingClarificationCount(Array.isArray(data) ? data.length : 0);
+        }
+      } catch {
+        // Ignore — non-critical
+      }
+    }
+    fetchClarifications();
+    // Refresh every 60s so new clarifications from background polls surface
+    const interval = setInterval(fetchClarifications, 60000);
+    return () => clearInterval(interval);
   }, []);
 
   // Save sessions to localStorage on state change
@@ -484,13 +505,38 @@ export default function RobinPage() {
               </div>
             </div>
 
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 11, padding: "5px 10px", flexShrink: 0 }}
-              onClick={handleNewChat}
-            >
-              + New
-            </button>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {pendingClarificationCount > 0 && (
+                <Link
+                  href="/dashboard"
+                  title="Robin has pending questions — go to Workspace to answer them"
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    background: "rgba(242,109,33,0.15)",
+                    color: "var(--accent)",
+                    border: "1px solid rgba(242,109,33,0.35)",
+                    padding: "4px 10px",
+                    borderRadius: 20,
+                    textDecoration: "none",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                    flexShrink: 0,
+                    animation: "pulse 2s infinite",
+                  }}
+                >
+                  ❓ {pendingClarificationCount} question{pendingClarificationCount !== 1 ? "s" : ""}
+                </Link>
+              )}
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11, padding: "5px 10px", flexShrink: 0 }}
+                onClick={handleNewChat}
+              >
+                + New
+              </button>
+            </div>
           </div>
 
           {/* Message Thread */}

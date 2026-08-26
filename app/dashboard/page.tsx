@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Goal, Task, Priority, TaskStatus } from "@/types";
+import { Goal, Task, Priority, TaskStatus, Clarification } from "@/types";
 import Navbar from "@/components/Navbar";
 import { useSession } from "next-auth/react";
 
@@ -26,6 +26,7 @@ export default function DashboardPage() {
   const { data: session } = useSession();
   const [goals, setGoals] = useState<Goal[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [clarifications, setClarifications] = useState<Clarification[]>([]);
   const [loading, setLoading] = useState(true);
   const [goalInput, setGoalInput] = useState("");
   const [goalDesc, setGoalDesc] = useState("");
@@ -39,9 +40,17 @@ export default function DashboardPage() {
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [gr, tr] = await Promise.all([fetch("/api/goals"), fetch("/api/tasks")]);
-      setGoals(await gr.json());
-      setTasks(await tr.json());
+      const [gr, tr, cr] = await Promise.all([
+        fetch("/api/goals"),
+        fetch("/api/tasks"),
+        fetch("/api/clarifications"),
+      ]);
+      const goalsData = await gr.json();
+      const tasksData = await tr.json();
+      const clarifData = cr.ok ? await cr.json() : [];
+      setGoals(Array.isArray(goalsData) ? goalsData : []);
+      setTasks(Array.isArray(tasksData) ? tasksData : []);
+      setClarifications(Array.isArray(clarifData) ? clarifData : []);
     } catch {
       setError("Could not load workspace.");
     } finally {
@@ -147,10 +156,42 @@ export default function DashboardPage() {
     setShowModal(true);
   }
 
-  const cols: { key: TaskStatus; label: string }[] = [
+  async function answerClarification(id: string, answer: string) {
+    const res = await fetch("/api/clarifications", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, answer }),
+    });
+    if (res.ok) {
+      setClarifications((prev) => prev.filter((c) => c.id !== id));
+      // Refresh tasks in case a new one was created
+      const tr = await fetch("/api/tasks");
+      const tasksData = await tr.json();
+      if (Array.isArray(tasksData)) setTasks(tasksData);
+    } else {
+      setError("Could not answer clarification.");
+    }
+  }
+
+  async function dismissClarification(id: string) {
+    const res = await fetch("/api/clarifications", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, answer: "", action: "dismiss" }),
+    });
+    if (res.ok) {
+      setClarifications((prev) => prev.filter((c) => c.id !== id));
+    } else {
+      setError("Could not dismiss clarification.");
+    }
+  }
+
+  // Kanban columns include "cancelled" for visibility
+  const cols: { key: TaskStatus; label: string; dimmed?: boolean }[] = [
     { key: "todo", label: "To Do" },
     { key: "in-progress", label: "In Progress" },
     { key: "done", label: "Done" },
+    { key: "cancelled", label: "Cancelled", dimmed: true },
   ];
 
   return (
@@ -189,6 +230,49 @@ export default function DashboardPage() {
         </div>
 
         {error && <div className="toast-err" style={{ marginBottom: 16 }}>{error}</div>}
+
+        {/* ── Robin Inbox (Pending Clarifications) ── */}
+        {clarifications.length > 0 && (
+          <section style={{ marginBottom: 32 }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                marginBottom: 14,
+              }}
+            >
+              <span className="section-label">❓ Robin Inbox</span>
+              <span
+                style={{
+                  fontSize: 11,
+                  background: "rgba(242,109,33,0.15)",
+                  color: "var(--accent)",
+                  border: "1px solid rgba(242,109,33,0.3)",
+                  padding: "1px 7px",
+                  borderRadius: 20,
+                  fontWeight: 600,
+                }}
+              >
+                {clarifications.length} pending
+              </span>
+              <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+                — Robin needs your input to create tasks from these emails
+              </span>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {clarifications.map((c) => (
+                <ClarificationCard
+                  key={c.id}
+                  clarification={c}
+                  onAnswer={(answer) => answerClarification(c.id, answer)}
+                  onDismiss={() => dismissClarification(c.id)}
+                />
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* ── Goals ── */}
         <section style={{ marginBottom: 32 }}>
@@ -301,7 +385,23 @@ export default function DashboardPage() {
                         marginBottom: 6,
                       }}
                     >
-                      <span style={{ fontWeight: 600, fontSize: 14 }}>{g.title}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontWeight: 600, fontSize: 14 }}>{g.title}</span>
+                        {g.kind === "project" && (
+                          <span
+                            style={{
+                              fontSize: 10,
+                              background: "var(--bg-hover)",
+                              color: "var(--text-secondary)",
+                              padding: "1px 6px",
+                              borderRadius: 10,
+                              fontWeight: 500,
+                            }}
+                          >
+                            project
+                          </span>
+                        )}
+                      </div>
                       <button
                         onClick={() => deleteGoal(g.id)}
                         style={{
@@ -371,12 +471,13 @@ export default function DashboardPage() {
                 <div
                   key={col.key}
                   style={{
-                    background: "var(--bg-card)",
+                    background: col.dimmed ? "var(--bg)" : "var(--bg-card)",
                     border: "1px solid var(--border)",
                     borderRadius: 12,
                     display: "flex",
                     flexDirection: "column",
                     minHeight: 280,
+                    opacity: col.dimmed ? 0.75 : 1,
                   }}
                 >
                   {/* Col header */}
@@ -389,7 +490,9 @@ export default function DashboardPage() {
                       alignItems: "center",
                     }}
                   >
-                    <span style={{ fontSize: 13, fontWeight: 600 }}>{col.label}</span>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: col.dimmed ? "var(--text-secondary)" : "var(--text-primary)" }}>
+                      {col.label}
+                    </span>
                     <span
                       style={{
                         fontSize: 11,
@@ -449,7 +552,7 @@ export default function DashboardPage() {
         </section>
       </div>
 
-      {/* Modal */}
+      {/* Task Edit/Create Modal */}
       {showModal && (
         <div
           className="overlay"
@@ -529,6 +632,7 @@ export default function DashboardPage() {
                     <option value="todo">To Do</option>
                     <option value="in-progress">In Progress</option>
                     <option value="done">Done</option>
+                    <option value="cancelled">Cancelled</option>
                   </select>
                 </div>
               </div>
@@ -597,6 +701,149 @@ export default function DashboardPage() {
   );
 }
 
+// ── ClarificationCard ────────────────────────────────────────────────────────
+function ClarificationCard({
+  clarification,
+  onAnswer,
+  onDismiss,
+}: {
+  clarification: Clarification;
+  onAnswer: (answer: string) => void;
+  onDismiss: () => void;
+}) {
+  const [freeText, setFreeText] = useState("");
+  const [answering, setAnswering] = useState(false);
+
+  const candidateTasks: { id: string; title: string }[] =
+    clarification.context?.candidate_tasks ?? [];
+  const threadSnippet = clarification.context?.thread_snippet as string | undefined;
+
+  async function handleAnswer(answer: string) {
+    setAnswering(true);
+    await onAnswer(answer);
+    setAnswering(false);
+  }
+
+  return (
+    <div
+      style={{
+        background: "var(--bg-card)",
+        border: "1.5px solid rgba(242,109,33,0.35)",
+        borderRadius: 12,
+        padding: "16px 18px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      {/* Header */}
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ fontSize: 14 }}>❓</span>
+          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-primary)" }}>
+            {clarification.question}
+          </span>
+        </div>
+        <button
+          onClick={onDismiss}
+          title="Dismiss"
+          style={{
+            background: "none",
+            border: "none",
+            color: "var(--text-secondary)",
+            cursor: "pointer",
+            fontSize: 12,
+            padding: "2px 4px",
+            flexShrink: 0,
+          }}
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Email snippet */}
+      {threadSnippet && (
+        <div
+          style={{
+            fontSize: 12,
+            color: "var(--text-secondary)",
+            background: "var(--bg)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            padding: "8px 10px",
+            lineHeight: 1.5,
+            fontStyle: "italic",
+          }}
+        >
+          "{threadSnippet.slice(0, 220)}{threadSnippet.length > 220 ? "…" : ""}"
+        </div>
+      )}
+
+      {/* Quick-pick candidate tasks */}
+      {candidateTasks.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={{ fontSize: 11, color: "var(--text-secondary)", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Possible matches:
+          </span>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {candidateTasks.slice(0, 4).map((ct) => (
+              <button
+                key={ct.id}
+                className="btn btn-ghost"
+                style={{ fontSize: 12, padding: "6px 12px", borderRadius: 20 }}
+                disabled={answering}
+                onClick={() => handleAnswer(`This updates the task: "${ct.title}" (ID: ${ct.id})`)}
+              >
+                📋 {ct.title}
+              </button>
+            ))}
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 12, padding: "6px 12px", borderRadius: 20 }}
+              disabled={answering}
+              onClick={() => handleAnswer("This is new work — please create a new task")}
+            >
+              ✨ New task
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Free-text answer */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <input
+          className="input"
+          style={{ flex: 1, fontSize: 12, padding: "7px 10px" }}
+          placeholder="Or type your answer…"
+          value={freeText}
+          onChange={(e) => setFreeText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && freeText.trim()) {
+              handleAnswer(freeText.trim());
+              setFreeText("");
+            }
+          }}
+          disabled={answering}
+        />
+        <button
+          className="btn btn-primary"
+          style={{ fontSize: 12, padding: "7px 14px", flexShrink: 0 }}
+          disabled={answering || !freeText.trim()}
+          onClick={() => {
+            if (freeText.trim()) {
+              handleAnswer(freeText.trim());
+              setFreeText("");
+            }
+          }}
+        >
+          {answering ? <div className="spinner" style={{ width: 14, height: 14 }} /> : "Answer"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── TaskCard ─────────────────────────────────────────────────────────────────
 function TaskCard({
   task,
   goals,
@@ -612,15 +859,16 @@ function TaskCard({
 }) {
   const goal = goals.find((g) => g.id === task.goal_id);
   const isOverdue =
-    task.deadline && task.status !== "done" && new Date(task.deadline) < new Date();
+    task.deadline && task.status !== "done" && task.status !== "cancelled" && new Date(task.deadline) < new Date();
 
   return (
     <div
       style={{
         background: "var(--bg)",
-        border: "1px solid var(--border)",
+        border: `1px solid ${task.blocked ? "rgba(248,113,113,0.35)" : "var(--border)"}`,
         borderRadius: 8,
         padding: "12px 14px",
+        opacity: task.status === "cancelled" ? 0.6 : 1,
       }}
     >
       <div
@@ -632,7 +880,17 @@ function TaskCard({
           marginBottom: 6,
         }}
       >
-        <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.4 }}>{task.title}</span>
+        <span
+          style={{
+            fontSize: 13,
+            fontWeight: 500,
+            lineHeight: 1.4,
+            textDecoration: task.status === "cancelled" ? "line-through" : "none",
+            color: task.status === "cancelled" ? "var(--text-secondary)" : "var(--text-primary)",
+          }}
+        >
+          {task.title}
+        </span>
         <span className={`badge badge-${task.priority}`} style={{ flexShrink: 0, fontSize: 11 }}>
           {task.priority}
         </span>
@@ -652,6 +910,7 @@ function TaskCard({
         </p>
       )}
 
+      {/* Badges row */}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8 }}>
         {goal && (
           <span
@@ -695,6 +954,39 @@ function TaskCard({
             📧 Gmail
           </span>
         )}
+        {/* Blocked badge */}
+        {task.blocked && (
+          <span
+            style={{
+              fontSize: 10,
+              background: "rgba(248,113,113,0.12)",
+              color: "var(--danger)",
+              padding: "2px 8px",
+              borderRadius: 20,
+              fontWeight: 600,
+            }}
+            title={`Blocked by: ${(task.blocking_task_titles ?? []).join(", ")}`}
+          >
+            ⛔ Blocked by: {(task.blocking_task_titles ?? []).slice(0, 1).join("")}
+            {(task.blocking_task_titles ?? []).length > 1 && ` +${(task.blocking_task_titles ?? []).length - 1}`}
+          </span>
+        )}
+        {/* Needs review badge */}
+        {task.needs_review && (
+          <span
+            style={{
+              fontSize: 10,
+              background: "rgba(234,179,8,0.12)",
+              color: "#ca8a04",
+              padding: "2px 8px",
+              borderRadius: 20,
+              fontWeight: 500,
+            }}
+            title="Robin extracted this with low confidence — verify the details"
+          >
+            ⚠ Review
+          </span>
+        )}
       </div>
 
       <div
@@ -715,6 +1007,7 @@ function TaskCard({
           <option value="todo">To Do</option>
           <option value="in-progress">In Progress</option>
           <option value="done">Done</option>
+          <option value="cancelled">Cancelled</option>
         </select>
         <button
           className="btn btn-ghost"

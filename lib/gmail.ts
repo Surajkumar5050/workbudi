@@ -1,6 +1,7 @@
 import { google } from "googleapis";
 import type { gmail_v1 } from "googleapis";
 import { supabaseAdmin } from "./supabase";
+import type { ThreadMessage } from "@/types";
 
 function buildOAuth2Client() {
   return new google.auth.OAuth2(
@@ -109,6 +110,60 @@ function parseMessage(messageId: string, msg: gmail_v1.Schema$Message) {
     body_snippet: bodyText.slice(0, 1200) || "(No content)",
     received_at: new Date(parseInt(msg.internalDate ?? "0")).toISOString(),
   };
+}
+
+/**
+ * Fetches all messages in a Gmail thread and returns them as a structured
+ * array ordered oldest → newest, capped at 10 entries to control token usage.
+ *
+ * Each entry contains from, date, subject, and up to 600 chars of body text —
+ * enough for Robin to reason about context without blowing the context window.
+ */
+export async function getThreadMessages(
+  userId: string,
+  threadId: string
+): Promise<ThreadMessage[]> {
+  try {
+    const auth = await getAuthorizedClient(userId);
+    const gmail = google.gmail({ version: "v1", auth });
+
+    const { data } = await gmail.users.threads.get({
+      userId: "me",
+      id: threadId,
+      format: "full",
+    });
+
+    const rawMessages = data.messages ?? [];
+
+    // Sort oldest first, cap at 10 to keep prompt size bounded
+    const sorted = rawMessages
+      .slice()
+      .sort(
+        (a, b) =>
+          parseInt(a.internalDate ?? "0") - parseInt(b.internalDate ?? "0")
+      )
+      .slice(-10);
+
+    return sorted.map((msg): ThreadMessage => {
+      const headers = msg.payload?.headers ?? [];
+      const getHeader = (name: string) =>
+        headers.find((h) => h.name?.toLowerCase() === name)?.value ?? "";
+
+      const body = extractTextFromPayload(msg.payload);
+      const snippet = msg.snippet ? cleanHtmlToText(msg.snippet) : "";
+      const bodyText = (body.trim() || snippet).slice(0, 600);
+
+      return {
+        from: getHeader("from"),
+        date: getHeader("date") || new Date(parseInt(msg.internalDate ?? "0")).toISOString(),
+        subject: getHeader("subject") || "(no subject)",
+        body: bodyText || "(No content)",
+      };
+    });
+  } catch (err) {
+    console.warn("[Gmail] getThreadMessages failed for thread", threadId, err);
+    return [];
+  }
 }
 
 export async function getEmailById(userId: string, messageId: string) {
