@@ -47,9 +47,10 @@ export default function DashboardPage() {
     const t = setTimeout(() => {
       setRecentlyUpdated((prev) => { const n = new Set(prev); n.delete(id); return n; });
       highlightTimers.current.delete(id);
-    }, 4000);
+    }, 6000); // 6s glow
     highlightTimers.current.set(id, t);
   }
+
 
   function flashChangedTasks(oldTasks: Task[], newTasks: Task[]) {
     const oldMap = new Map(oldTasks.map((t) => [t.id, t.updated_at]));
@@ -71,14 +72,25 @@ export default function DashboardPage() {
       const tasksData = await tr.json();
       const clarifData = cr.ok ? await cr.json() : [];
       setGoals(Array.isArray(goalsData) ? goalsData : []);
-      setTasks(Array.isArray(tasksData) ? tasksData : []);
+      const taskArr: Task[] = Array.isArray(tasksData) ? tasksData : [];
+      setTasks(taskArr);
       setClarifications(Array.isArray(clarifData) ? clarifData : []);
+
+      // Highlight any task that was created or updated in the last 3 minutes
+      const now = Date.now();
+      taskArr.forEach((t) => {
+        const updateTime = new Date(t.updated_at || t.created_at).getTime();
+        if (now - updateTime < 180_000) {
+          flashTask(t.id);
+        }
+      });
     } catch {
       setError("Could not load workspace.");
     } finally {
       setLoading(false);
     }
   }, []);
+
 
   useEffect(() => {
     loadData();
@@ -964,18 +976,19 @@ function TaskCard({
   return (
     <div
       style={{
-        background: highlight ? "rgba(242,109,33,0.06)" : "var(--bg)",
+        background: highlight ? "rgba(242,109,33,0.08)" : "var(--bg)",
         border: `1.5px solid ${
           highlight
-            ? "rgba(242,109,33,0.55)"
+            ? "rgba(242,109,33,0.85)"
             : task.blocked
             ? "rgba(248,113,113,0.35)"
             : "var(--border)"
         }`,
+        boxShadow: highlight ? "0 0 16px rgba(242,109,33,0.35)" : "none",
         borderRadius: 8,
         padding: "12px 14px",
         opacity: task.status === "cancelled" ? 0.6 : 1,
-        transition: "border-color 0.4s ease, background 0.4s ease",
+        transition: "all 0.5s ease",
         position: "relative",
       }}
     >
@@ -988,18 +1001,21 @@ function TaskCard({
             right: 8,
             fontSize: 9,
             fontWeight: 700,
-            background: "rgba(242,109,33,0.18)",
+            background: "rgba(242,109,33,0.25)",
             color: "var(--accent)",
+            border: "1px solid rgba(242,109,33,0.45)",
             padding: "1px 7px",
             borderRadius: 20,
             letterSpacing: "0.04em",
             textTransform: "uppercase",
             pointerEvents: "none",
+            boxShadow: "0 0 8px rgba(242,109,33,0.3)",
           }}
         >
           ✦ Updated
         </span>
       )}
+
       <div
         style={{
           display: "flex",
