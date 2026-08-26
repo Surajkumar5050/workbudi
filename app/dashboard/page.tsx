@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Goal, Task, Priority, TaskStatus, Clarification } from "@/types";
 import Navbar from "@/components/Navbar";
 import { useSession } from "next-auth/react";
@@ -36,6 +36,28 @@ export default function DashboardPage() {
   const [editing, setEditing] = useState<Task | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // IDs of tasks that were just added or updated — shown with a highlight glow for 4s
+  const [recentlyUpdated, setRecentlyUpdated] = useState<Set<string>>(new Set());
+  const highlightTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  function flashTask(id: string) {
+    setRecentlyUpdated((prev) => new Set(prev).add(id));
+    // Clear any existing timer for this id
+    if (highlightTimers.current.has(id)) clearTimeout(highlightTimers.current.get(id)!);
+    const t = setTimeout(() => {
+      setRecentlyUpdated((prev) => { const n = new Set(prev); n.delete(id); return n; });
+      highlightTimers.current.delete(id);
+    }, 4000);
+    highlightTimers.current.set(id, t);
+  }
+
+  function flashChangedTasks(oldTasks: Task[], newTasks: Task[]) {
+    const oldMap = new Map(oldTasks.map((t) => [t.id, t.updated_at]));
+    for (const t of newTasks) {
+      const prev = oldMap.get(t.id);
+      if (!prev || prev !== t.updated_at) flashTask(t.id);
+    }
+  }
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -105,6 +127,7 @@ export default function DashboardPage() {
         if (!res.ok) throw new Error();
         const u = await res.json();
         setTasks((p) => p.map((t) => (t.id === u.id ? u : t)));
+        flashTask(u.id);
       } else {
         const res = await fetch("/api/tasks", {
           method: "POST",
@@ -114,7 +137,9 @@ export default function DashboardPage() {
         if (!res.ok) throw new Error();
         const newTask = await res.json();
         setTasks((p) => [newTask, ...p]);
+        flashTask(newTask.id);
       }
+
       setShowModal(false);
       setEditing(null);
       setForm(blank);
@@ -134,6 +159,7 @@ export default function DashboardPage() {
     if (res.ok) {
       const u = await res.json();
       setTasks((p) => p.map((t) => (t.id === u.id ? u : t)));
+      flashTask(id);
     } else setError("Could not update status.");
   }
 
@@ -172,10 +198,12 @@ export default function DashboardPage() {
       } else {
         setClarifications((prev) => prev.filter((c) => c.id !== id));
       }
-      // Refresh tasks in case a new one was created or updated
+      // Refresh tasks and flash any that changed/were created
       const tr = await fetch("/api/tasks");
       const tasksData = await tr.json();
-      if (Array.isArray(tasksData)) setTasks(tasksData);
+      if (Array.isArray(tasksData)) {
+        setTasks((old) => { flashChangedTasks(old, tasksData); return tasksData; });
+      }
     } else {
       setError("Could not answer clarification.");
     }
@@ -548,6 +576,7 @@ export default function DashboardPage() {
                         onDelete={deleteTask}
                         onStatus={updateStatus}
                         onReview={acknowledgeReview}
+                        highlight={recentlyUpdated.has(task.id)}
                       />
                     ))}
                     {colTasks.length === 0 && (
@@ -912,6 +941,7 @@ function TaskCard({
   onDelete,
   onStatus,
   onReview,
+  highlight,
 }: {
   task: Task;
   goals: Goal[];
@@ -919,21 +949,57 @@ function TaskCard({
   onDelete: (id: string) => void;
   onStatus: (id: string, s: TaskStatus) => void;
   onReview: (id: string) => void;
+  highlight?: boolean;
 }) {
   const goal = goals.find((g) => g.id === task.goal_id);
   const isOverdue =
     task.deadline && task.status !== "done" && task.status !== "cancelled" && new Date(task.deadline) < new Date();
 
+  // Render description inline: split on newlines, show bullet lines, cap at 3 lines
+  const [descExpanded, setDescExpanded] = useState(false);
+  const descLines = (task.description ?? "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const showLines = descExpanded ? descLines : descLines.slice(0, 3);
+  const hasMore = descLines.length > 3;
+
   return (
     <div
       style={{
-        background: "var(--bg)",
-        border: `1px solid ${task.blocked ? "rgba(248,113,113,0.35)" : "var(--border)"}`,
+        background: highlight ? "rgba(242,109,33,0.06)" : "var(--bg)",
+        border: `1.5px solid ${
+          highlight
+            ? "rgba(242,109,33,0.55)"
+            : task.blocked
+            ? "rgba(248,113,113,0.35)"
+            : "var(--border)"
+        }`,
         borderRadius: 8,
         padding: "12px 14px",
         opacity: task.status === "cancelled" ? 0.6 : 1,
+        transition: "border-color 0.4s ease, background 0.4s ease",
+        position: "relative",
       }}
     >
+      {/* "Just updated" pill shown at top-right while highlight is active */}
+      {highlight && (
+        <span
+          style={{
+            position: "absolute",
+            top: 8,
+            right: 8,
+            fontSize: 9,
+            fontWeight: 700,
+            background: "rgba(242,109,33,0.18)",
+            color: "var(--accent)",
+            padding: "1px 7px",
+            borderRadius: 20,
+            letterSpacing: "0.04em",
+            textTransform: "uppercase",
+            pointerEvents: "none",
+          }}
+        >
+          ✦ Updated
+        </span>
+      )}
       <div
         style={{
           display: "flex",
@@ -959,18 +1025,45 @@ function TaskCard({
         </span>
       </div>
 
-      {task.description && (
-        <p
-          style={{
-            fontSize: 12,
-            color: "var(--text-secondary)",
-            marginBottom: 8,
-            lineHeight: 1.4,
-          }}
-        >
-          {task.description.slice(0, 90)}
-          {task.description.length > 90 ? "…" : ""}
-        </p>
+      {descLines.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          {showLines.map((line, i) => {
+            const isBullet = line.startsWith("-") || line.startsWith("•") || line.startsWith("*") || /^\d+\./.test(line);
+            return (
+              <div
+                key={i}
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 5,
+                  fontSize: 12,
+                  color: "var(--text-secondary)",
+                  lineHeight: 1.45,
+                  marginBottom: 2,
+                }}
+              >
+                {isBullet ? null : <span style={{ color: "var(--text-secondary)", opacity: 0.4, flexShrink: 0, marginTop: 1 }}>›</span>}
+                <span>{isBullet ? line : line}</span>
+              </div>
+            );
+          })}
+          {hasMore && (
+            <button
+              onClick={() => setDescExpanded((v) => !v)}
+              style={{
+                background: "none",
+                border: "none",
+                cursor: "pointer",
+                fontSize: 11,
+                color: "var(--accent)",
+                padding: 0,
+                marginTop: 2,
+              }}
+            >
+              {descExpanded ? "▲ Show less" : `▼ +${descLines.length - 3} more lines`}
+            </button>
+          )}
+        </div>
       )}
 
       {/* Badges row */}
