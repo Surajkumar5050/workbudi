@@ -135,13 +135,21 @@ export default function GmailPage() {
     }
   }
 
+  const historyIdRef = useRef<string | null>(null);
+
+  function updateHistoryId(id: string | null) {
+    historyIdRef.current = id;
+    setHistoryId(id);
+  }
+
   async function checkNow() {
-    if (!historyId) return;
+    const hid = historyIdRef.current || historyId;
+    if (!hid) return;
     try {
-      const r = await fetch(`/api/gmail/poll?historyId=${historyId}`);
+      const r = await fetch(`/api/gmail/poll?historyId=${hid}`);
       if (r.ok) {
         const d = await r.json();
-        setHistoryId(d.historyId);
+        updateHistoryId(d.historyId);
         if (d.newEmails?.length) {
           setNewCount((n) => n + d.newEmails.length);
           await loadEmails();
@@ -152,33 +160,53 @@ export default function GmailPage() {
     }
   }
 
-  function togglePolling() {
+  async function togglePolling() {
     if (polling) {
       if (pollRef.current) clearInterval(pollRef.current);
       setPolling(false);
-      setHistoryId(null);
+      updateHistoryId(null);
       setNewCount(0);
       return;
     }
+
     setPolling(true);
     setNewCount(0);
-    pollRef.current = setInterval(async () => {
-      const hid = historyId;
-      if (!hid) {
-        const r = await fetch("/api/gmail/poll");
-        if (r.ok) setHistoryId((await r.json()).historyId);
-        return;
-      }
-      const r = await fetch(`/api/gmail/poll?historyId=${hid}`);
+
+    // Initial baseline sync to get current historyId immediately
+    try {
+      const r = await fetch("/api/gmail/poll");
       if (r.ok) {
         const d = await r.json();
-        setHistoryId(d.historyId);
-        if (d.newEmails?.length) {
-          setNewCount((n) => n + d.newEmails.length);
-          await loadEmails();
-        }
+        updateHistoryId(d.historyId);
       }
-    }, 30000);
+    } catch {
+      // ignore
+    }
+
+    pollRef.current = setInterval(async () => {
+      const hid = historyIdRef.current;
+      if (!hid) {
+        const r = await fetch("/api/gmail/poll");
+        if (r.ok) {
+          const d = await r.json();
+          updateHistoryId(d.historyId);
+        }
+        return;
+      }
+      try {
+        const r = await fetch(`/api/gmail/poll?historyId=${hid}`);
+        if (r.ok) {
+          const d = await r.json();
+          updateHistoryId(d.historyId);
+          if (d.newEmails?.length) {
+            setNewCount((n) => n + d.newEmails.length);
+            await loadEmails();
+          }
+        }
+      } catch {
+        // Silent error during background polling interval
+      }
+    }, 15000); // Poll every 15s for responsive real-time updates
   }
 
   const senderName = (from: string) =>
