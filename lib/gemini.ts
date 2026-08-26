@@ -5,8 +5,13 @@ import path from "path";
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-const MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"];
-const REQUEST_TIMEOUT_MS = 8000; // Raised from 4000 — two-pass extraction can take longer
+const MODELS = [
+  "gemini-flash-lite-latest",
+  "gemini-2.5-flash",
+  "gemini-3.6-flash",
+  "gemini-flash-latest",
+];
+const REQUEST_TIMEOUT_MS = 15000; // 15s timeout for complex thread analysis
 
 // ── Load Robin's system prompt from the dedicated .md file ──────────────────
 const ROBIN_SYSTEM_PROMPT = fs.readFileSync(
@@ -40,8 +45,10 @@ async function generateWithFallback(
       const text = result.response.text().trim();
       if (text) return text;
     } catch (err: unknown) {
-      console.warn(`[Gemini] ${modelName} failed:`, err instanceof Error ? err.message : err);
+      console.warn(`[Gemini] ${modelName} failed, falling back:`, err instanceof Error ? err.message : err);
       lastError = err;
+      // Brief yield before trying next model
+      await new Promise((r) => setTimeout(r, 200));
       continue;
     }
   }
